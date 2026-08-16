@@ -7,22 +7,26 @@ env:
   # `valueFrom` names an APP RESOURCE, not a secret scope. Add it on the app's
   # page under Resources:
   #
-  #   | resource key | scope    | key          | permission |
-  #   |--------------|----------|--------------|------------|
-  #   | lakebase-url | database | lakebase-url | READ       |
+  #   | resource key         | scope    | key                  | permission |
+  #   |----------------------|----------|----------------------|------------|
+  #   | weather-lakebase-url | database | weather-lakebase-url | READ       |
   #
   # Without the resource the variable resolves to an empty string and the app
   # falls through to the SDK path below.
   - name: LAKEBASE_URL
-    valueFrom: lakebase-url
+    valueFrom: weather-lakebase-url
 
   # --- Fallback: read the secret through the SDK ------------------------------
   # Used only when LAKEBASE_URL is unset/empty. Requires the app's service
   # principal to have READ on the scope.
+  #
+  # This app deliberately uses its OWN key rather than the shared
+  # `database/lakebase-url` that the day-2 ticker-news app reads. Sharing one key
+  # would mean repointing that app every time this one changes databases.
   - name: LAKEBASE_SECRET_SCOPE
     value: "database"
   - name: LAKEBASE_SECRET_KEY
-    value: "lakebase-url"
+    value: "weather-lakebase-url"
 
   # --- Non-secret configuration ----------------------------------------------
   # The NWS API needs no key, but it does require a User-Agent identifying the

@@ -183,7 +183,9 @@ request and the grid lookup. An unknown city returns a 400 listing every support
 | `notebooks/ingest_weather_embeddings.py` | Batch embed job with a dimension preflight |
 | `scripts/benchmark_hnsw.py` | HNSW vs. sequential-scan latency, with a synthetic-scale mode |
 | `test_deployment.py` | End-to-end test; verifies every write through the API *and* in Postgres |
+| `setup_secrets.py` | One-time write of the Lakebase DSN to `database/weather-lakebase-url` |
 | `sql/00`–`sql/03` | Role grant, both table DDLs, verification queries |
+| `DEPLOY.md` | Databricks Apps runbook — instance, secret, schema, deploy, teardown |
 
 ---
 
