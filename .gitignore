@@ -37,6 +37,10 @@ venv/
 # Model cache (fastembed downloads the ONNX export on first use)
 .cache/
 
+# Databricks CLI sync state - local bookkeeping for `databricks sync`,
+# not source. Committing it makes every machine fight over the snapshot.
+.databricks/
+
 # ---------------------------------------------------------------------------
 # Editors / OS
 # ---------------------------------------------------------------------------
