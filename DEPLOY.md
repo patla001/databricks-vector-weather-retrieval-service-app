@@ -1,30 +1,31 @@
 # Deploying to Databricks Apps
 
-Runbook for `dbc-7e085092-52e4.cloud.databricks.com`. Every command below is
-copy-pasteable; nothing here has been run against the account yet.
+Runbook for `dbc-7e085092-52e4.cloud.databricks.com`. **This has been run
+end to end** — the values below are what was actually deployed, not a template.
 
-**Nothing in this repo provisions cloud resources on import or on deploy.** Step 1
-is the only step that starts billing, and it is a single explicit command.
+**Step 1 is the only step that starts billing** (and the app compute in step 4
+bills separately). Everything is CLI-driven; no UI step is required.
 
 ---
 
-## Current state of the workspace
-
-Checked with the CLI (`databricks` v1.11.0, `DEFAULT` profile), read-only:
+## What is deployed
 
 | | |
 |---|---|
 | Workspace | `https://dbc-7e085092-52e4.cloud.databricks.com` |
-| Identity | Ezer Patlan &lt;epatlan1742@sdsu.edu&gt; |
-| Lakebase instances | **none** — `databricks database list-database-instances` returns `[]` |
-| Existing apps | `lakebase-support-app`, `massive-lakebase-app` (both ACTIVE) |
-| Secret scopes | `database`, `massive`, `support` |
-| Keys in `database` | `lakebase-url` (points at the deleted `massive-sync-db`) |
+| Lakebase instance | `weather-vector-db` — CU_1, PG 16.14, pgvector 0.8.0, native login on |
+| Instance host | `ep-noisy-brook-d1569dvn.database.us-west-2.cloud.databricks.com` |
+| Postgres role | `weather_app` (static password, `USAGE` + `CREATE` on `public`) |
+| Secret | `database/weather-lakebase-url` |
+| App | `weather-vector-app` |
+| App URL | `https://weather-vector-app-2808874854650870.aws.databricksapps.com` |
+| Verification | `test_deployment.py` — **28 passed, 0 failed** |
 
-> ⚠️ **Both existing apps are pointed at a database that no longer exists.**
-> `massive-sync-db.database.cloud.databricks.com` does not resolve. That is why
-> this app uses its own secret key (`database/weather-lakebase-url`) — so
-> creating a database for the weather app never silently repoints the day-2 app.
+> ⚠️ **The two pre-existing apps (`lakebase-support-app`, `massive-lakebase-app`)
+> point at a database that no longer exists** — `massive-sync-db` was deleted, and
+> its hostname does not resolve. That is exactly why this app uses its own secret
+> key rather than the shared `database/lakebase-url`: creating a database here
+> never silently repoints the day-2 app at a database missing all of its tables.
 
 ---
 
@@ -139,23 +140,39 @@ databricks apps deploy $APP --source-code-path $WS
 
 ### Add the secret resource
 
-The app reads `LAKEBASE_URL` from an app **resource**, which has to be attached
-in the UI: **Apps → `weather-vector-app` → Edit → Resources → Add resource → Secret**
+The app reads `LAKEBASE_URL` from an app **resource**. This is settable from the
+CLI — `apps update --json` accepts the full request body including `resources`,
+so no UI step is required:
 
-| field | value |
-|---|---|
-| Resource key | `weather-lakebase-url` |
-| Scope | `database` |
-| Key | `weather-lakebase-url` |
-| Permission | `READ` |
+```bash
+databricks apps update weather-vector-app --json '{
+  "name": "weather-vector-app",
+  "resources": [
+    {
+      "name": "weather-lakebase-url",
+      "secret": {"scope": "database", "key": "weather-lakebase-url", "permission": "READ"}
+    }
+  ]
+}'
+```
 
-The resource key must be exactly `weather-lakebase-url` — that string is what
-`app.yaml`'s `valueFrom` looks up. Redeploy after adding it.
+The resource `name` must be exactly `weather-lakebase-url` — that string is what
+`app.yaml`'s `valueFrom` looks up.
 
-If the resource is missing, `LAKEBASE_URL` resolves to an empty string and
-`lakebase.py` falls through to reading `database/weather-lakebase-url` through
-the SDK — which works only if the app's service principal has READ on the scope.
-The resource is the reliable path.
+Also grant the app's service principal READ on the scope, so the SDK fallback in
+`lakebase.py` works if the resource is ever detached:
+
+```bash
+SP=$(databricks apps get weather-vector-app -o json \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)["service_principal_client_id"])')
+databricks secrets put-acl database "$SP" READ
+```
+
+Redeploy after either change.
+
+The same resource can be attached in the UI instead
+(**Apps → app → Edit → Resources → Add resource → Secret**), but the CLI form
+above is scriptable and is what was actually used.
 
 ---
 
@@ -223,6 +240,7 @@ Deleting the instance is what stops the charge; deleting the app alone does not.
 
 | Symptom | Cause |
 |---|---|
+| `/healthz` returns 200 with an **empty body** on the deployed app | Expected. Databricks Apps claims `/healthz` as its own platform probe and answers it at the proxy — the request never reaches Flask, so you get `content-length: 0` and no `content-type`. Locally the same path returns `{"status":"ok"}` from `app.py`. Use `GET /` to confirm the app itself is serving |
 | App starts, `/healthz` OK, everything else 500 | Secret resource not attached, or the DSN is wrong. Check the app's logs — `lakebase.py` logs which source the URL came from, never the value |
 | `password authentication failed` | Usually a doubled hostname, not a bad password. `nslookup` the host from the DSN |
 | `permission denied for schema public` | `sql/00_grant_app_role.sql` hasn't been run as a superuser |

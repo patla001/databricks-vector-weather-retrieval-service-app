@@ -37,6 +37,26 @@ def check(ok: bool, label: str, detail: str = "") -> bool:
     return ok
 
 
+def body(resp) -> dict:
+    """Parse a JSON body, returning {} rather than raising on anything else.
+
+    A deployed app can answer with HTML (an auth redirect) or an empty body (a
+    platform health check) where JSON was expected. Those should show up as
+    failed checks with a readable detail line, not as a traceback that abandons
+    the rest of the suite.
+    """
+    try:
+        return resp.json()
+    except ValueError:
+        return {}
+
+
+def describe(resp) -> str:
+    """Short, safe description of a response for a failure detail line."""
+    ctype = (resp.headers.get("content-type") or "none").split(";")[0]
+    return f"HTTP {resp.status_code}, content-type {ctype}, {len(resp.content)}B"
+
+
 def main(base_url: str) -> int:
     base_url = base_url.rstrip("/")
     session = requests.Session()
@@ -52,9 +72,20 @@ def main(base_url: str) -> int:
     print(f"target: {base_url}\n")
 
     # -- health ------------------------------------------------------------
+    # On Databricks Apps, /healthz is claimed by the PLATFORM as its own health
+    # probe: it answers 200 with an empty body and no content-type, and the
+    # request never reaches Flask. Locally the same path returns
+    # {"status": "ok"} from app.py. Accept either - a 200 means alive on both.
     r = session.get(f"{base_url}/healthz", timeout=30)
-    check(r.status_code == 200 and r.json().get("status") == "ok",
-          "GET /healthz", f"{r.status_code}")
+    served_by_flask = body(r).get("status") == "ok"
+    check(r.status_code == 200, "GET /healthz", describe(r)
+          + (" (Flask)" if served_by_flask else " (platform probe)"))
+
+    # The index route is app code on every host, so it is the real liveness
+    # check for the deployed service.
+    r = session.get(f"{base_url}/", timeout=30)
+    check(r.status_code == 200 and "endpoints" in body(r),
+          "GET / (app is actually serving)", describe(r))
 
     # -- sync --------------------------------------------------------------
     before = weather_pipeline.summarize()
@@ -66,11 +97,11 @@ def main(base_url: str) -> int:
     )
     ok = check(r.status_code == 200, "POST /weather/sync", f"{r.status_code}")
     if ok:
-        body = r.json()
-        check("synced" in body and isinstance(body["synced"], int),
-              "  sync response has an integer 'synced'", str(body.get("synced")))
-        check(bool(body.get("by_source")),
-              "  sync response breaks down by source_type", str(body.get("by_source")))
+        data = body(r)
+        check("synced" in data and isinstance(data["synced"], int),
+              "  sync response has an integer 'synced'", str(data.get("synced")))
+        check(bool(data.get("by_source")),
+              "  sync response breaks down by source_type", str(data.get("by_source")))
 
         # Second check: go straight to Postgres. The API said it wrote rows;
         # confirm they are actually there.
@@ -83,14 +114,35 @@ def main(base_url: str) -> int:
               f"{after['alerts']} alerts + {after['forecasts']} forecasts")
 
     # -- idempotence -------------------------------------------------------
-    n1 = weather_pipeline.summarize()["documents"]
+    # Asserting the row count is unchanged would be wrong: NWS is a live feed,
+    # and a warning issued between the two syncs legitimately adds a row. The
+    # real invariant is that re-syncing UPSERTS rather than INSERTS - every id
+    # seen before is still present exactly once afterwards.
+    ids_before = {r["id"] for r in lakebase.run_query(
+        f"SELECT id FROM {weather_pipeline.DEFAULT_DOCUMENTS_TABLE}")}
+
     session.post(
         f"{base_url}/weather/sync",
         json={"locations": ["Chicago, IL", "Miami, FL"], "limit": 25},
         timeout=300,
     )
-    n2 = weather_pipeline.summarize()["documents"]
-    check(n1 == n2, "re-running sync does not duplicate rows", f"{n1} -> {n2}")
+
+    rows = lakebase.run_query(
+        f"SELECT count(*) AS total, count(DISTINCT id) AS distinct_ids "
+        f"FROM {weather_pipeline.DEFAULT_DOCUMENTS_TABLE}")[0]
+    check(rows["total"] == rows["distinct_ids"],
+          "re-running sync creates no duplicate documents",
+          f"{rows['total']} rows / {rows['distinct_ids']} distinct ids")
+
+    ids_after = {r["id"] for r in lakebase.run_query(
+        f"SELECT id FROM {weather_pipeline.DEFAULT_DOCUMENTS_TABLE}")}
+    check(ids_before <= ids_after,
+          "  re-sync preserves every previously-synced document",
+          f"{len(ids_before - ids_after)} lost")
+    new_ids = ids_after - ids_before
+    if new_ids:
+        print(f"       ({len(new_ids)} genuinely new upstream document(s) arrived "
+              f"between syncs - expected on a live feed)")
 
     # -- schema invariants (direct SQL) ------------------------------------
     orphans = lakebase.run_query(f"""
@@ -127,8 +179,8 @@ def main(base_url: str) -> int:
                          timeout=120)
         ok = check(r.status_code == 200, "POST /weather/search", f"{r.status_code}")
         if ok:
-            body = r.json()
-            results = body.get("results", [])
+            data = body(r)
+            results = data.get("results", [])
             check(len(results) > 0, "  search returns results", f"{len(results)} hit(s)")
             if results:
                 first = results[0]
@@ -145,15 +197,15 @@ def main(base_url: str) -> int:
                          json={"query": "sunny", "top_k": 5, "source_type": "forecast"},
                          timeout=120)
         if check(r.status_code == 200, "POST /weather/search (source_type filter)"):
-            rows = r.json().get("results", [])
+            rows = body(r).get("results", [])
             check(all(x["source_type"] == "forecast" for x in rows),
                   "  filter returns only forecasts", f"{len(rows)} row(s)")
 
         # GET variant
         r = session.get(f"{base_url}/weather/search",
                         params={"query": "heat advisory", "top_k": 3}, timeout=120)
-        check(r.status_code == 200 and r.json().get("count", 0) > 0,
-              "GET /weather/search", f"{r.status_code}")
+        check(r.status_code == 200 and body(r).get("count", 0) > 0,
+              "GET /weather/search", describe(r))
 
     # -- edge cases --------------------------------------------------------
     r = session.post(f"{base_url}/weather/search", json={}, timeout=60)
@@ -161,8 +213,8 @@ def main(base_url: str) -> int:
 
     r = session.post(f"{base_url}/weather/search",
                      json={"query": "x", "top_k": 9999}, timeout=120)
-    check(r.status_code == 200 and r.json().get("top_k") == 20,
-          "top_k=9999 clamps to 20", str(r.json().get("top_k")))
+    check(r.status_code == 200 and body(r).get("top_k") == 20,
+          "top_k=9999 clamps to 20", str(body(r).get("top_k")))
 
     r = session.post(f"{base_url}/weather/search",
                      json={"query": "x", "source_type": "tornado"}, timeout=60)

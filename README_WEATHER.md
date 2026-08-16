@@ -27,7 +27,8 @@ against a new unstructured source.
 | Embedding model | `sentence-transformers/all-MiniLM-L6-v2`, **384 dims** |
 | Distinct models in the table | **1** |
 | Index | `hnsw (embedding vector_cosine_ops)` |
-| End-to-end test | **26 passed, 0 failed** |
+| End-to-end test | **28 passed, 0 failed** (local and against the deployed app) |
+| Deployed | `weather-vector-app` on Databricks Apps, backed by the `weather-vector-db` Lakebase instance |
 | Locations | Chicago IL, Austin TX, Houston TX, Miami FL, Denver CO |
 
 ### Search quality
@@ -271,7 +272,7 @@ curl -s -XPOST localhost:8000/weather/search -H 'content-type: application/json'
 curl -s 'localhost:8000/weather/search?query=severe+thunderstorm&top_k=3&summarize=true'
 
 # 6. Verify
-.venv/bin/python test_deployment.py http://localhost:8000     # 26 passed, 0 failed
+.venv/bin/python test_deployment.py http://localhost:8000     # 28 passed, 0 failed
 .venv/bin/python scripts/benchmark_hnsw.py --runs 40 --synthetic 50000
 #    plus sql/03_verify_weather_embeddings.sql in the Lakebase SQL editor
 ```
