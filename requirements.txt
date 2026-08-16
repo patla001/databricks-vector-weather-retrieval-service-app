@@ -1,0 +1,16 @@
+databricks-sdk>=0.30.0
+psycopg2-binary>=2.9.9
+sqlalchemy>=2.0.30
+flask>=3.0.3
+requests>=2.32.3
+python-dotenv>=1.0.1
+# Semantic search: runs all-MiniLM-L6-v2 via ONNX on CPU. Chosen over
+# sentence-transformers (~2.5GB of torch) because the app has to cold-start
+# inside a Databricks App container, and the two runtimes agree to cosine 0.99+
+# on the same weights. Used on BOTH sides here - ingestion and query - so the
+# stored vectors and the query vector can never come from different exports.
+fastembed>=0.4.0
+# Optional: only needed for the ?summarize=true RAG variant of GET /weather/search.
+# The endpoint degrades gracefully to search-only when this or ANTHROPIC_API_KEY
+# is missing, so it is safe to drop from a deployment that doesn't want it.
+anthropic>=0.40.0

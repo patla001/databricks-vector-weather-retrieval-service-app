@@ -1,0 +1,46 @@
+# ---------------------------------------------------------------------------
+# Secrets - never commit a filled-in environment file
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+env.dms
+.envrc
+.databrickscfg
+.pgpass
+*.pgpass
+
+# Anything that looks like a captured connection string. The Lakebase DSN
+# carries the role password inline, so a stray "connection url" dump is a
+# credential leak.
+*connection*url*
+*.log
+
+# Keys and certs
+*.pem
+*.key
+*.crt
+*.p12
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Model cache (fastembed downloads the ONNX export on first use)
+.cache/
+
+# ---------------------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp

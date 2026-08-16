@@ -1,0 +1,66 @@
+-- Grant the app's Postgres role permission to create tables.
+--
+-- SKIP THIS if the role is already a member of `databricks_superuser` - that
+-- membership already confers CREATE. Check first:
+--     SELECT has_schema_privilege('weather_app', 'public', 'CREATE');
+--
+-- ============================================================================
+-- WHERE TO RUN THIS - read before pasting it anywhere
+-- ============================================================================
+-- This is PostgreSQL DDL. It must reach the Lakebase Postgres database.
+--
+-- DO NOT run it in a notebook `%sql` cell. That executes against Unity Catalog,
+-- which reads `weather_app` as a Databricks principal (user/group/service
+-- principal) rather than a Postgres role, and fails with:
+--     ErrorClass=PRINCIPAL_DOES_NOT_EXIST ... Could not find principal with
+--     name weather_app
+-- The statement is valid in both dialects, which is exactly why the mistake is
+-- easy to make - Unity Catalog accepts the syntax and then can't resolve the name.
+--
+-- Use one of these instead:
+--
+--   1. The Lakebase instance's own query editor in the Databricks UI (opened
+--      from the database instance page - not the generic SQL editor, which
+--      targets Unity Catalog). This is the easy path.
+--
+--   2. psql, authenticated as your Databricks identity:
+--        psql "postgresql://<you>@<host>:5432/databricks_postgres?sslmode=require"
+--
+--   3. A notebook PYTHON cell connecting to Postgres directly:
+--
+--        import base64, psycopg2
+--        from urllib.parse import unquote, urlparse
+--        from databricks.sdk import WorkspaceClient
+--        url = base64.b64decode(WorkspaceClient().secrets.get_secret(
+--            scope="database", key="lakebase-url").value).decode()
+--        p = urlparse(url)
+--        conn = psycopg2.connect(host=p.hostname, port=p.port or 5432,
+--                                dbname=p.path.lstrip('/'), user=p.username,
+--                                password=unquote(p.password), sslmode='require')
+--        conn.autocommit = True
+--        conn.cursor().execute("GRANT CREATE ON SCHEMA public TO weather_app")
+--
+--      Note: that DSN connects AS the app role, which cannot grant to itself.
+--      Run it as a superuser role, or use option 1/2.
+--
+-- Whichever you pick, it must run as a role with superuser rights - your own
+-- Databricks identity belongs to `databricks_superuser`. The app role cannot
+-- grant this to itself.
+--
+-- WHY IT'S NEEDED: as of PostgreSQL 15 the `public` schema no longer grants
+-- CREATE to every role. A freshly created Lakebase password role gets USAGE but
+-- not CREATE, so app.py's ensure_weather_documents_table() fails with
+-- "permission denied for schema public".
+--
+-- Replace weather_app if you named your role something else.
+-- ============================================================================
+
+GRANT CREATE ON SCHEMA public TO weather_app;
+
+-- pgvector itself is an extension, and CREATE EXTENSION is superuser-only on
+-- most installs. Run 02_setup_weather_embeddings.sql as a superuser role once;
+-- the app role only ever needs to read and write the table afterwards.
+
+-- Verify (expect: t, t)
+SELECT has_schema_privilege('weather_app', 'public', 'USAGE')  AS has_usage,
+       has_schema_privilege('weather_app', 'public', 'CREATE') AS has_create;

@@ -1,0 +1,9 @@
+[project]
+name = "databricks-vector-weather-retrieval-service-app"
+version = "0.1.0"
+description = "NWS weather text -> Lakebase pgvector -> semantic search REST API"
+requires-python = ">=3.11"
+
+# Dependencies live in requirements.txt - that is the file Databricks Apps
+# installs from, so keeping a second list here would only invite drift.
+dependencies = []

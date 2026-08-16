@@ -1,0 +1,23 @@
+# Databricks Asset Bundle for the weather retrieval service.
+#
+# `workspace.host` is deliberately omitted. A placeholder host here is picked up
+# by every `databricks` CLI command run from this directory - including ones
+# that have nothing to do with this bundle - and they all fail against the
+# fake host. Set it per-invocation with `--profile` or DATABRICKS_HOST instead.
+
+bundle:
+  name: databricks-vector-weather-retrieval-service-app
+
+# No `include:` block - this bundle deploys the app only. The embedding job runs
+# as a plain script (notebooks/ingest_weather_embeddings.py); if you later want
+# it on a schedule, add resources/*.yml and re-add the include here.
+
+targets:
+  dev:
+    mode: development
+    default: true
+
+  prod:
+    mode: production
+    workspace:
+      root_path: /Shared/.bundle/${bundle.name}/${bundle.target}
