@@ -54,5 +54,22 @@ env:
   - name: FASTEMBED_CACHE_PATH
     value: "/tmp/.cache/fastembed"
 
+  # --- In-app refresh scheduler ----------------------------------------------
+  # Active NWS alerts expire within hours, so the corpus needs re-harvesting on
+  # a timer. This runs inside the app process rather than as a Databricks Job:
+  # the workspace is serverless-only, and a serverless job task that loads
+  # requests + psycopg2 + fastembed together segfaults its kernel (see
+  # DEPLOY.md). The app already runs that exact combination to serve
+  # /weather/search, so it is the runtime that provably works.
+  # Set WEATHER_REFRESH_MINUTES to 0 to turn the timer off.
+  - name: WEATHER_REFRESH_MINUTES
+    value: "30"
+  - name: WEATHER_REFRESH_STARTUP_DELAY
+    value: "60"
+  - name: WEATHER_REFRESH_LIMIT
+    value: "50"
+  - name: WEATHER_PURGE_EXPIRED_DAYS
+    value: "7"
+
   - name: FLASK_DEBUG
     value: "0"

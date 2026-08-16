@@ -207,8 +207,8 @@ curl -s -XPOST "$URL/weather/sync" -H 'content-type: application/json' \
 
 ### Embedding job
 
-`/weather/sync` only stores documents. The vectors come from a separate job, run
-from anywhere that can reach the database:
+`/weather/sync` only stores documents. The vectors come from a separate step,
+runnable from anywhere that can reach the database:
 
 ```bash
 LAKEBASE_URL='postgresql://...' python notebooks/ingest_weather_embeddings.py
@@ -217,10 +217,63 @@ LAKEBASE_URL='postgresql://...' python notebooks/ingest_weather_embeddings.py
 It preflights both tables and the vector dimension before doing any work, and
 the anti-join means re-running only embeds what's new.
 
-To run it inside Databricks instead, attach it as a notebook task on a
-single-node cluster; it needs `psycopg2-binary`, `fastembed`, and
-`databricks-sdk`. Sync alerts every 30–60 minutes and re-run the embed job right
-after — active alerts expire, so a stale corpus goes quiet.
+---
+
+## Step 6 — Keeping the corpus fresh
+
+Active NWS alerts expire within hours, so a corpus populated once goes quiet by
+the next day. The refresh runs **inside the app process** on a timer.
+
+| | |
+|---|---|
+| Where | `weather_scheduler.py`, started at import by `app.py` |
+| Cadence | `WEATHER_REFRESH_MINUTES` (default **30**; `0` disables) |
+| Each cycle | harvest → upsert → purge alerts expired > `WEATHER_PURGE_EXPIRED_DAYS` → embed pending |
+| Observe | `GET /weather/refresh/status` |
+| Force one | `POST /weather/refresh` (409 if a cycle is already running) |
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "$URL/weather/refresh/status"
+# {"enabled":true,"interval_minutes":30,"cycles":1,"failures":0,
+#  "last_result":{"fetched":133,"upserted":133,"embeddings_invalidated":2,
+#                 "embedded_written":5,"elapsed_seconds":1.96}, ...}
+```
+
+A cycle takes ~2s. Every step is idempotent — documents upsert on their natural
+id, chunks collide on a derived primary key — so a duplicate or overlapping
+cycle wastes work but cannot corrupt anything. A lock skips a tick rather than
+stacking cycles, and the thread swallows its exceptions so a failed refresh
+degrades freshness without taking the API down.
+
+### Why not a Databricks Job
+
+The obvious design is a scheduled Job, and `notebooks/scheduled_weather_refresh.py`
+still supports it (`--skip-embed` splits the stages; `--app-url` drives the app's
+endpoints instead of the database). It is **not** what runs here, for two reasons
+found by testing rather than assumption:
+
+1. **This workspace is serverless-only** — creating a job with a classic cluster
+   fails with `Only serverless compute is supported in the workspace`.
+2. **A serverless task that loads `requests` + `psycopg2` + `fastembed` into one
+   kernel segfaults it.** The failure is `Fatal error: The Python kernel is
+   unresponsive` with the run's logs discarded, which makes it look like a
+   hang rather than a crash. Isolated probes established that each *pair* is
+   fine — `fastembed` alone, and `psycopg2` + `requests` + `databricks-sdk`
+   together, both ran clean — and that the harvest crashed before writing a
+   single row.
+
+Driving the app's HTTP endpoints from a job avoids the crash but hits a second
+wall: a job's SDK credential is `auth_type: runtime`, an internal token the
+Apps OAuth proxy rejects. It answers with the **Databricks Sign-In page as
+HTTP 200 `text/html`**, so `raise_for_status()` passes and the failure only
+surfaces as a confusing `JSONDecodeError`. `refresh_via_app()` now detects a
+non-JSON content-type and says so plainly. Making that path work needs a
+service principal with an OAuth M2M secret granted `CAN_USE` on the app —
+worth doing if you want the refresh outside the app, but it is strictly more
+moving parts than a timer in a process that already works.
+
+The app container runs `psycopg2` + `fastembed` together happily — it must, to
+serve `/weather/search` — which is exactly why the scheduler lives there.
 
 ---
 

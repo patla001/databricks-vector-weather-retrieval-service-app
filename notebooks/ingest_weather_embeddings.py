@@ -26,11 +26,44 @@ import argparse
 import os
 import sys
 
-# Make the repo root importable whether this is run as a script from the repo
-# root, from inside notebooks/, or as a Databricks notebook (whose cwd varies).
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(_HERE)
-for path in (_ROOT, _HERE):
+def _repo_root() -> str:
+    """Locate the repo root so `import weather_pipeline` works anywhere.
+
+    Databricks serverless runs a spark_python_task through
+    `exec(compile(f.read(), filename, 'exec'))`, which leaves `__file__`
+    UNDEFINED - so os.path.dirname(__file__) raises NameError there while
+    working fine locally. Hence the ladder: WEATHER_REPO_ROOT, then __file__,
+    then a walk up from cwd looking for the package's own marker file.
+    """
+    env_root = os.environ.get("WEATHER_REPO_ROOT")
+    if env_root and os.path.isfile(os.path.join(env_root, "weather_pipeline.py")):
+        return env_root
+
+    # Also honour --repo-root from argv. sys.path has to be set up before
+    # argparse runs, so this is read directly rather than through the parser.
+    if "--repo-root" in sys.argv:
+        candidate = sys.argv[sys.argv.index("--repo-root") + 1]
+        if os.path.isfile(os.path.join(candidate, "weather_pipeline.py")):
+            return candidate
+
+    try:
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    except NameError:
+        pass
+
+    here = os.getcwd()
+    for _ in range(6):
+        if os.path.isfile(os.path.join(here, "weather_pipeline.py")):
+            return here
+        parent = os.path.dirname(here)
+        if parent == here:
+            break
+        here = parent
+    return os.getcwd()
+
+
+_ROOT = _repo_root()
+for path in (_ROOT, os.path.join(_ROOT, "notebooks")):
     if path not in sys.path:
         sys.path.insert(0, path)
 
@@ -114,6 +147,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="Cap how many pending documents to process this run.")
     parser.add_argument("--chunk-size", type=int, default=weather_pipeline.CHUNK_SIZE)
     parser.add_argument("--chunk-overlap", type=int, default=weather_pipeline.CHUNK_OVERLAP)
+    parser.add_argument("--repo-root", default=None,
+                        help="Repo root, for runners where __file__ is undefined "
+                             "(Databricks serverless). Read before argparse; listed "
+                             "here so the parser accepts it.")
     args = parser.parse_args(argv)
 
     # Imported here so --help works without paying the ONNX runtime import.
@@ -165,4 +202,13 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Deliberately NOT `raise SystemExit(main())`. Databricks serverless runs
+    # this through exec() inside an IPython kernel, where a SystemExit - even
+    # SystemExit(0) - tears the kernel down mid-flight. The task is then marked
+    # failed with "The Python kernel is unresponsive" and, worse, the buffered
+    # stdout is lost, so the run reports no logs at all. Raising only on a
+    # non-zero result keeps a real failure visible to the job while letting a
+    # successful run end cleanly under both runners.
+    _rc = main()
+    if _rc:
+        raise SystemExit(_rc)

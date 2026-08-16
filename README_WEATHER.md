@@ -183,6 +183,9 @@ request and the grid lookup. An unknown city returns a 400 listing every support
 | `lakebase.py` | Connection helper, copied unchanged from the day-2 project |
 | `notebooks/ingest_weather_embeddings.py` | Batch embed job with a dimension preflight |
 | `scripts/benchmark_hnsw.py` | HNSW vs. sequential-scan latency, with a synthetic-scale mode |
+| `weather_refresh.py` | One refresh cycle (harvest → upsert → purge → embed), shared by the app and the CLI |
+| `weather_scheduler.py` | In-app timer that runs a cycle every 30 min so the corpus stays current |
+| `notebooks/scheduled_weather_refresh.py` | The same cycle as a CLI, for manual or external scheduling |
 | `test_deployment.py` | End-to-end test; verifies every write through the API *and* in Postgres |
 | `setup_secrets.py` | One-time write of the Lakebase DSN to `database/weather-lakebase-url` |
 | `sql/00`–`sql/03` | Role grant, both table DDLs, verification queries |
@@ -292,6 +295,9 @@ on conflict, so row counts stay flat.
 | `POST` | `/weather/search` | `{"query": "...", "top_k": 5, "source_type": "alert", "location": "Chicago, IL"}` |
 | `GET` | `/weather/search` | `?query=…&top_k=5&source_type=alert&summarize=true` |
 | `GET` | `/weather/stats` | Row counts per table plus the unembedded backlog |
+| `POST` | `/weather/embed` | Embed pending documents; `{"limit": 200}` optional |
+| `GET` | `/weather/refresh/status` | Scheduler health: cycles, failures, last result |
+| `POST` | `/weather/refresh` | Force one refresh cycle now (409 if one is running) |
 
 ### `POST /weather/search`
 
@@ -370,10 +376,13 @@ the results.
 - **The city table caps coverage at 40 cities.** Raw `"lat,lon"` works for anywhere in NWS
   coverage, but "Fargo, ND" doesn't resolve. A geocoder is the fix; I skipped it to avoid a
   third-party dependency with its own rate limit in the request path.
-- **Active alerts expire, so the corpus is a moving target.** Nothing currently deletes
-  documents past `expires_at`, so old alerts accumulate and stay searchable. A TTL sweep
-  (`DELETE FROM weather_documents WHERE expires_at < now() - interval '7 days'`) would cascade
-  to the embeddings; I'd want it on a schedule before running this continuously.
+- **Staleness is handled, but by a timer inside the app rather than a Databricks Job.**
+  `weather_scheduler.py` re-harvests every 30 minutes and purges alerts that expired more
+  than 7 days ago (the FK cascade takes their vectors with them). A scheduled Job would be
+  the more conventional home for this; it isn't used because the workspace is serverless-only
+  and a serverless task loading `requests` + `psycopg2` + `fastembed` together segfaults its
+  kernel — see DEPLOY.md for the evidence and the two alternatives. The in-app timer has a
+  real limitation: if the app is stopped, the refresh stops with it.
 - **Chunking is character-based, not token-aware.** Cheap and close enough at 800 characters,
   but a token-aware splitter would pack chunks more evenly against the model's 256-token window.
 - **No reranker.** Cosine over MiniLM is a single-stage retriever. The similarity scores

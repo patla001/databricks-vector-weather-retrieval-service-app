@@ -360,12 +360,136 @@ def search_weather_get():
     return _run_search(query, top_k, source_type, location, summarize)
 
 
+@app.route("/weather/embed", methods=["POST"])
+def embed_pending():
+    """
+    Embed documents that have no vectors yet.
+
+    Body (optional): {"limit": 200}
+
+    This exists so the scheduled refresh job doesn't need its own copy of the
+    embedding stack. The app already holds the model warm for /weather/search,
+    so the job can stay a thin HTTP client with no ONNX runtime, no psycopg2,
+    and no chance of the two sides drifting onto different model exports.
+
+    Idempotent: chunks collide on their derived primary key and are skipped, so
+    calling it repeatedly converges rather than duplicating.
+    """
+    import weather_search  # lazy: pulls in the ONNX runtime on first use
+
+    if not _embeddings_table_exists():
+        return (
+            jsonify({"error": f"The {EMBEDDINGS_TABLE} table does not exist. Run "
+                              "sql/02_setup_weather_embeddings.sql first."}),
+            409,
+        )
+
+    body = request.json if request.is_json else {}
+    if not isinstance(body, dict):
+        return _bad_request("Request body must be a JSON object.")
+
+    limit = body.get("limit")
+    if limit is not None:
+        try:
+            limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            return _bad_request('"limit" must be an integer.')
+
+    pending = weather_pipeline.pending_documents(limit=limit)
+    if not pending:
+        return jsonify({"pending": 0, "documents": 0, "chunks": 0, "written": 0,
+                        "note": "nothing to embed"})
+
+    result = weather_pipeline.embed_documents(
+        weather_search.embed_texts,
+        weather_search.EMBED_MODEL,
+        pending,
+        log=logger.info,
+    )
+    remaining = weather_pipeline.summarize()["pending"]
+    return jsonify({**result, "model": weather_search.EMBED_MODEL, "remaining": remaining})
+
+
 @app.route("/weather/stats")
 def weather_stats():
     """Row counts for both tables plus the unembedded backlog."""
     if not _embeddings_table_exists():
         return jsonify({"error": f"The {EMBEDDINGS_TABLE} table does not exist."}), 409
     return jsonify(weather_pipeline.summarize())
+
+
+@app.route("/weather/refresh/status")
+def refresh_status():
+    """What the in-app scheduler has been doing.
+
+    Active NWS alerts expire within hours, so "is the refresh loop alive?" is
+    the difference between a live corpus and one that quietly goes stale. This
+    makes that answerable without reading container logs.
+    """
+    import weather_scheduler
+
+    return jsonify(weather_scheduler.status())
+
+
+@app.route("/weather/refresh", methods=["POST"])
+def refresh_now():
+    """Run one refresh cycle immediately (harvest + purge + embed).
+
+    Body (optional): {"locations": [...], "limit": 50}
+
+    The scheduler runs this on a timer; this route is for forcing a cycle after
+    a deploy or while testing. Returns 409 rather than queueing if a cycle is
+    already in flight.
+    """
+    import weather_scheduler
+
+    body = request.json if request.is_json else {}
+    if not isinstance(body, dict):
+        return _bad_request("Request body must be a JSON object.")
+
+    locations = body.get("locations")
+    if locations is not None:
+        if not isinstance(locations, list) or not all(isinstance(x, str) for x in locations):
+            return _bad_request('"locations" must be a list of strings.')
+        try:
+            for location in locations:
+                resolve_location(location)
+        except LocationError as err:
+            return _bad_request(str(err))
+
+    limit = body.get("limit")
+    if limit is not None:
+        try:
+            limit = max(1, min(int(limit), MAX_SYNC_LIMIT))
+        except (TypeError, ValueError):
+            return _bad_request('"limit" must be an integer.')
+
+    ensure_weather_documents_table()
+    result = weather_scheduler.run_once(locations=locations, limit=limit)
+    if result.get("skipped"):
+        return jsonify(result), 409
+    return jsonify(result)
+
+
+def _start_scheduler():
+    """Start the background refresh timer, once, in the serving process.
+
+    Guarded against Flask's reloader, which runs the module twice in debug mode
+    and would otherwise give you two timers racing each other.
+    """
+    if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
+        try:
+            import weather_scheduler
+
+            weather_scheduler.start()
+        except Exception:
+            # A scheduler that won't start must not stop the API from serving.
+            logger.exception("could not start the refresh scheduler")
+
+
+# Started at import so it runs under a WSGI server (which never executes the
+# __main__ block below), not just under `python app.py`.
+_start_scheduler()
 
 
 if __name__ == '__main__':
