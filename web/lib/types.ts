@@ -41,12 +41,26 @@ export interface SearchResponse {
   summary_error?: string;
 }
 
+export interface SummaryBudget {
+  model: string;
+  /** False when ANTHROPIC_API_KEY is unset — the answer card stays dark. */
+  enabled: boolean;
+  calls_today: number;
+  daily_limit: number;
+  /** null when the daily limit is disabled (limit of 0). */
+  remaining_today: number | null;
+  cache_hits_today: number;
+  throttled_today: number;
+  cached_summaries: number;
+}
+
 export interface Stats {
   documents: number;
   alerts: number;
   forecasts: number;
   embeddings: number;
   pending: number;
+  summary?: SummaryBudget;
 }
 
 export interface RefreshResult {

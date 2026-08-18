@@ -349,6 +349,69 @@ the browser never loads a TopoJSON decoder.
 
 ---
 
+## Cost guardrails
+
+**One endpoint spends money: `GET /weather/search?summarize=true`.** Harvest,
+embed, map, the benchmark and the 30-minute refresh timer talk only to
+api.weather.gov and Postgres — they cost nothing per call. So the bounds live
+around the summary rather than as generic middleware, and **every one of them
+degrades to search-only instead of failing the request.**
+
+Roughly **1–2.5¢ per summarized search** on `claude-opus-5` (top_k=8 → ~1.3¢;
+top_k=20 → ~2.5¢).
+
+| Guard | Where | Default |
+|---|---|---|
+| **Query length cap** | `MAX_QUERY_CHARS` in `app.py`, mirrored in the console's input | 500 chars |
+| **Summaries are opt-in** | The console's `Summarize` chip starts off | off |
+| **Answer cache** | keyed on model + query + the exact chunks retrieved | 256 entries, 1h |
+| **Daily ceiling** | `WEATHER_SUMMARY_DAILY_LIMIT`, per UTC day, whole app | 200 calls |
+| **Call timeout / retries** | `WEATHER_SUMMARY_TIMEOUT`, `WEATHER_SUMMARY_MAX_RETRIES` | 60s, 2 |
+
+**The query cap is the one that matters most.** The query goes into the summary
+prompt verbatim, so its length is billed as input tokens. Unbounded, someone
+pasting a document into the search box sends ~250K tokens — **about $1.25 in a
+single request** — and nothing on screen would tell them why. That is an
+accident, not an attack, which is exactly why it needs a bound rather than a
+policy. 500 characters is past any real weather question and past what the
+384-dim embedding model reads anyway (it truncates at 512 tokens), so the cap
+costs no retrieval quality.
+
+**The cache keys on the retrieved chunks, not just the query.** When the refresh
+cycle changes which passages a question retrieves, the key changes with it, so a
+stale answer is never served over fresh evidence. The model id is in the key for
+the same reason — changing `WEATHER_SUMMARY_MODEL` must not serve answers the
+previous model wrote.
+
+Budget claims are taken *before* the call and refunded when it fails, so a
+broken upstream cannot silently drain the day. A **refusal keeps its claim** on
+purpose: a client retrying a declined query in a loop should still hit the
+ceiling.
+
+`GET /weather/stats` reports the whole picture (`summary.calls_today`,
+`remaining_today`, `cache_hits_today`, `throttled_today`), and the console's
+Pipeline drawer renders it.
+
+> ⚠️ **Also set a spend limit in the Anthropic Console** (Settings → Limits).
+> The in-app ceiling is a backstop for a runaway loop, but a limit enforced
+> inside the process cannot help when the process itself is the problem. The
+> Console limit is the only one that holds through a bug in this app.
+
+### What is deliberately *not* guarded
+
+**Per-user rate limiting.** The app sits behind the Databricks OAuth proxy, so
+reaching it already requires a workspace identity — that bounds who can spend
+before any application logic runs. Add per-user quotas if the app is ever shared
+more widely than the workspace.
+
+**Prompt injection**, beyond the length cap. The passages come from
+api.weather.gov, not from users. The query *is* user-controlled and does reach
+the model, but there are no tools attached and the summary cannot reach anything
+`/weather/search` would not already return — so the worst case is a strange
+paragraph, and the length cap covers the part that costs money.
+
+---
+
 ## Endpoints
 
 | Method | Path | Notes |

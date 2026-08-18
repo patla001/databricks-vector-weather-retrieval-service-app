@@ -96,5 +96,20 @@ env:
   # - name: ANTHROPIC_API_KEY
   #   valueFrom: anthropic-api-key
 
+  # --- Summary guardrails -----------------------------------------------------
+  # The summary is the only per-request cost in this app. These bound it; each
+  # one degrades to search-only rather than failing the request.
+  #
+  # Set a spend limit on the Anthropic Console as well. A ceiling enforced
+  # inside the process cannot help when the process itself is the problem.
+  - name: WEATHER_SUMMARY_DAILY_LIMIT
+    value: "200"
+  - name: WEATHER_SUMMARY_TIMEOUT
+    value: "60"
+  - name: WEATHER_SUMMARY_CACHE_SIZE
+    value: "256"
+  - name: WEATHER_SUMMARY_CACHE_TTL
+    value: "3600"
+
   - name: FLASK_DEBUG
     value: "0"

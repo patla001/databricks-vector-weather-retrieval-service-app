@@ -262,6 +262,15 @@ def main(base_url: str) -> int:
     r = session.post(f"{base_url}/weather/search", json={}, timeout=60)
     check(r.status_code == 400, "missing query -> 400", f"{r.status_code}")
 
+    # An unbounded query is a real cost hole, not just bad input: it goes into
+    # the summary prompt verbatim and is billed as input tokens.
+    r = session.post(f"{base_url}/weather/search",
+                     json={"query": "flood " * 400}, timeout=60)
+    check(r.status_code == 400, "oversized query -> 400", describe(r))
+    r = session.get(f"{base_url}/weather/search",
+                    params={"query": "flood " * 400}, timeout=60)
+    check(r.status_code == 400, "oversized query -> 400 (GET too)", describe(r))
+
     r = session.post(f"{base_url}/weather/search",
                      json={"query": "x", "top_k": 9999}, timeout=120)
     check(r.status_code == 200 and body(r).get("top_k") == 20,
@@ -274,6 +283,16 @@ def main(base_url: str) -> int:
     r = session.post(f"{base_url}/weather/sync",
                      json={"locations": ["Nowhere, ZZ"]}, timeout=60)
     check(r.status_code == 400, "unknown location -> 400", f"{r.status_code}")
+
+    # -- summary guardrails -------------------------------------------------
+    r = session.get(f"{base_url}/weather/stats", timeout=60)
+    budget = body(r).get("summary") or {}
+    if check(bool(budget), "stats carries the summary budget"):
+        check(isinstance(budget.get("daily_limit"), int),
+              "  daily ceiling is configured", f"limit={budget.get('daily_limit')}")
+        check("enabled" in budget,
+              "  reports whether answers are configured",
+              "on" if budget.get("enabled") else "off (ANTHROPIC_API_KEY unset)")
 
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0

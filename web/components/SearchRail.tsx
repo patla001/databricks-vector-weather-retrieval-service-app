@@ -24,6 +24,10 @@ interface Props {
   onHover: (id: string | null) => void;
 }
 
+// Mirrors MAX_QUERY_CHARS in app.py. The query goes into the summary prompt
+// verbatim, so its length is billed — stopping it at the input beats a 400.
+const MAX_QUERY_CHARS = 500;
+
 const EXAMPLES = [
   "flash flood risk this weekend",
   "dangerous heat and humidity",
@@ -62,6 +66,7 @@ export default function SearchRail(props: Props) {
             placeholder="Ask about the weather…"
             aria-label="Search the weather corpus"
             autoComplete="off"
+            maxLength={MAX_QUERY_CHARS}
           />
         </form>
 
@@ -95,7 +100,7 @@ export default function SearchRail(props: Props) {
             className="chip"
             data-on={summarize}
             onClick={() => onSummarize(!summarize)}
-            title="Add an LLM answer grounded in the retrieved passages"
+            title="Add an LLM answer grounded in the retrieved passages. Costs one model call per search; repeated questions are served from cache."
           >
             Summarize
           </button>

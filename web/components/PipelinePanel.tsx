@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import type {
-  BenchmarkResult, EmbedResult, RefreshResult, RefreshStatus, Stats, SyncResult,
+  BenchmarkResult, EmbedResult, RefreshResult, RefreshStatus, Stats, SummaryBudget, SyncResult,
 } from "@/lib/types";
 
 interface Props {
@@ -164,6 +164,21 @@ export default function PipelinePanel({ stats, refresh, onClose, onChanged }: Pr
           )}
         </section>
 
+        {/* ---- Cost guardrails ------------------------------------------- */}
+        <section className="stage">
+          <div className="stage-head">
+            <h3>Answer budget</h3>
+            <span className="tag">{stats?.summary?.model ?? "—"}</span>
+          </div>
+          <p className="why">
+            The generated answer is the only part of this app that costs money per request —
+            harvest, embed and the refresh timer talk to NWS and Postgres and cost nothing.
+            Identical questions over identical passages are served from cache, and a daily
+            ceiling stops a runaway loop. Both degrade to search-only rather than failing.
+          </p>
+          {stats?.summary ? <Budget summary={stats.summary} /> : null}
+        </section>
+
         {/* ---- Stretch: HNSW benchmark ----------------------------------- */}
         <section className="stage">
           <div className="stage-head">
@@ -210,6 +225,35 @@ export default function PipelinePanel({ stats, refresh, onClose, onChanged }: Pr
         </section>
       </div>
     </aside>
+  );
+}
+
+function Budget({ summary }: { summary: SummaryBudget }) {
+  const limited = summary.daily_limit > 0;
+  const spent = summary.calls_today;
+  const low = limited && summary.remaining_today !== null && summary.remaining_today <= 10;
+  return (
+    <div className="readout">
+      <span className="k">key         </span>
+      <span className={summary.enabled ? "win" : "warn"}>
+        {summary.enabled ? "configured" : "not set — answers disabled"}
+      </span>
+      {"\n"}
+      <span className="k">calls today </span>
+      <span className={low ? "warn" : ""}>
+        {spent}
+        {limited ? ` / ${summary.daily_limit}` : " (no limit set)"}
+      </span>
+      {"\n"}
+      <span className="k">served free </span>
+      <span className="win">{summary.cache_hits_today}</span>
+      {" from cache"}
+      {"\n"}
+      <span className="k">cached      </span>{summary.cached_summaries} answer(s)
+      {summary.throttled_today > 0
+        ? `\n\n${summary.throttled_today} request(s) hit the daily ceiling and returned results without an answer.`
+        : ""}
+    </div>
   );
 }
 

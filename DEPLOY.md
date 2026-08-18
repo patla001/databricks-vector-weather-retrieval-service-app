@@ -19,7 +19,7 @@ bills separately). Everything is CLI-driven; no UI step is required.
 | Secret | `database/weather-lakebase-url` |
 | App | `weather-vector-app` |
 | App URL | `https://weather-vector-app-2808874854650870.aws.databricksapps.com` |
-| Verification | `test_deployment.py` — **40 passed, 0 failed** |
+| Verification | `test_deployment.py` — **45 passed, 0 failed** |
 
 > ⚠️ **The two pre-existing apps (`lakebase-support-app`, `massive-lakebase-app`)
 > point at a database that no longer exists** — `massive-sync-db` was deleted, and
@@ -202,7 +202,7 @@ The app URL is **not public** — requests need your Databricks identity, which 
 why `test_deployment.py` attaches SDK auth headers:
 
 ```bash
-python test_deployment.py "$URL"      # expect: 40 passed, 0 failed
+python test_deployment.py "$URL"      # expect: 45 passed, 0 failed
 ```
 
 Open `$URL` in a browser for the console itself — the globe, the ranked
@@ -322,5 +322,7 @@ Deleting the instance is what stops the charge; deleting the app alone does not.
 | `/` returns JSON instead of the console | `static/` is missing or empty. Run `cd web && npm run build`, then re-sync. The JSON fallback is deliberate so the API stays usable from a plain checkout |
 | Console loads but the globe is blank | Check that `GET /static/geo.json` returns ~118 KB. It is written by `npm run build`, not committed by hand |
 | Console shows "Summary unavailable" | Expected without `ANTHROPIC_API_KEY`. See the commented opt-in in `app.yaml`; search itself is unaffected |
+| Summaries stop partway through the day | The daily ceiling was reached. `GET /weather/stats` -> `summary.throttled_today`. Raise `WEATHER_SUMMARY_DAILY_LIMIT` or wait for 00:00 UTC; search is unaffected |
+| `query is N characters; the maximum is 500` | Working as intended — an unbounded query is billed as summary input tokens. See "Cost guardrails" in README_WEATHER.md |
 | Console shows "the API returned a page instead of JSON" | The Databricks OAuth session expired. Reload to sign in again |
 | Deploy succeeds but the app won't start | Check `app.yaml`'s port handling — `DATABRICKS_APP_PORT` must win, and it does in `app.py`'s `__main__` block |

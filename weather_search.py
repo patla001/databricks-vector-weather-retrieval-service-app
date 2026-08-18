@@ -16,8 +16,13 @@ App container.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import threading
+import time
+from collections import OrderedDict
+from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Sequence
 
@@ -150,6 +155,120 @@ def search_weather(
 
 SUMMARY_MODEL = os.environ.get("WEATHER_SUMMARY_MODEL", "claude-opus-5")
 
+# ---------------------------------------------------------------------------
+# Summary guardrails
+#
+# The summary is the only thing in this app that spends money per request:
+# everything else - sync, embed, map, the refresh scheduler - talks to NWS and
+# Postgres and costs nothing per call. So the bounds live here rather than as a
+# generic middleware, and each one degrades to search-only rather than failing
+# the request.
+# ---------------------------------------------------------------------------
+
+# Wall-clock bound on the API call. The SDK's default is 10 minutes, which on a
+# small container means a handful of stuck calls hold every worker and the whole
+# app stops answering - a availability failure long before it is a cost one.
+SUMMARY_TIMEOUT = float(os.environ.get("WEATHER_SUMMARY_TIMEOUT", "60"))
+SUMMARY_MAX_RETRIES = int(os.environ.get("WEATHER_SUMMARY_MAX_RETRIES", "2"))
+
+# Calls per UTC day, across the whole app. This is the backstop for a runaway
+# loop; the real ceiling should also be set on the Anthropic Console, because a
+# limit enforced inside the process cannot help if the process is the problem.
+SUMMARY_DAILY_LIMIT = int(os.environ.get("WEATHER_SUMMARY_DAILY_LIMIT", "200"))
+
+SUMMARY_CACHE_SIZE = int(os.environ.get("WEATHER_SUMMARY_CACHE_SIZE", "256"))
+SUMMARY_CACHE_TTL = float(os.environ.get("WEATHER_SUMMARY_CACHE_TTL", "3600"))
+
+_summary_lock = threading.Lock()
+_summary_cache: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
+_summary_usage = {"date": "", "calls": 0, "cache_hits": 0, "throttled": 0}
+
+
+def _summary_cache_key(query: str, results: list[dict]) -> str:
+    """Identify a summary by its question and the exact evidence behind it.
+
+    Keying on the retrieved chunks rather than on the query alone is what makes
+    the cache safe against a moving corpus: when the refresh cycle changes which
+    passages a query retrieves, the key changes with it and the stale summary is
+    never served. The model id is in the key for the same reason - switching
+    WEATHER_SUMMARY_MODEL must not serve answers written by the previous one.
+    """
+    evidence = "|".join(f"{row['id']}:{row['chunk_index']}" for row in results)
+    raw = f"{SUMMARY_MODEL}\x00{query}\x00{evidence}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _cache_get(key: str) -> str | None:
+    now = time.time()
+    with _summary_lock:
+        entry = _summary_cache.get(key)
+        if entry is None:
+            return None
+        stored_at, value = entry
+        if now - stored_at > SUMMARY_CACHE_TTL:
+            del _summary_cache[key]
+            return None
+        _summary_cache.move_to_end(key)
+        _summary_usage["cache_hits"] += 1
+        return value
+
+
+def _cache_put(key: str, value: str) -> None:
+    with _summary_lock:
+        _summary_cache[key] = (time.time(), value)
+        _summary_cache.move_to_end(key)
+        while len(_summary_cache) > SUMMARY_CACHE_SIZE:
+            _summary_cache.popitem(last=False)
+
+
+def _claim_budget() -> None:
+    """Reserve one call against today's ceiling, or refuse.
+
+    Claimed before the request rather than counted after it, so concurrent
+    callers cannot both pass the check and then both spend.
+    """
+    today = datetime.now(timezone.utc).date().isoformat()
+    with _summary_lock:
+        if _summary_usage["date"] != today:
+            _summary_usage.update(date=today, calls=0, cache_hits=0, throttled=0)
+        if SUMMARY_DAILY_LIMIT and _summary_usage["calls"] >= SUMMARY_DAILY_LIMIT:
+            _summary_usage["throttled"] += 1
+            raise RuntimeError(
+                f"the daily summary limit of {SUMMARY_DAILY_LIMIT} has been reached; "
+                f"search results are unaffected and the limit resets at 00:00 UTC"
+            )
+        _summary_usage["calls"] += 1
+
+
+def _release_budget() -> None:
+    """Hand a claim back when the call never reached the model.
+
+    A timeout or a transport error costs nothing, so charging it against the
+    day's ceiling would let a broken upstream silently exhaust the budget.
+    """
+    with _summary_lock:
+        _summary_usage["calls"] = max(0, _summary_usage["calls"] - 1)
+
+
+def summary_status() -> dict:
+    """What the summary path has spent today. Cheap enough to poll."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    with _summary_lock:
+        calls = _summary_usage["calls"] if _summary_usage["date"] == today else 0
+        hits = _summary_usage["cache_hits"] if _summary_usage["date"] == today else 0
+        throttled = _summary_usage["throttled"] if _summary_usage["date"] == today else 0
+        cached = len(_summary_cache)
+    return {
+        "model": SUMMARY_MODEL,
+        "enabled": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "calls_today": calls,
+        "daily_limit": SUMMARY_DAILY_LIMIT,
+        "remaining_today": max(0, SUMMARY_DAILY_LIMIT - calls) if SUMMARY_DAILY_LIMIT else None,
+        "cache_hits_today": hits,
+        "throttled_today": throttled,
+        "cached_summaries": cached,
+    }
+
 _SUMMARY_SYSTEM = (
     "You summarize National Weather Service text for someone asking about "
     "conditions. Answer only from the passages provided. If they do not cover "
@@ -178,32 +297,54 @@ def summarize_results(query: str, results: list[dict]) -> str:
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise RuntimeError("ANTHROPIC_API_KEY is not set")
 
+    # Serve an identical question over identical evidence for free. In practice
+    # this is the highest-value guardrail here: the same handful of queries get
+    # run over and over while the corpus barely moves between refreshes.
+    cache_key = _summary_cache_key(query, results)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     passages = "\n\n".join(
         f"[{i + 1}] {row['location']} - {row.get('event') or row.get('headline') or ''}"
         f" (similarity {row['similarity']})\n{row['chunk_text']}"
         for i, row in enumerate(results)
     )
 
-    client = anthropic.Anthropic()
-    response = client.messages.create(
-        model=SUMMARY_MODEL,
-        max_tokens=1024,
-        # Thinking is on by default on this model. A grounded one-paragraph
-        # summary over passages that are already retrieved needs very little
-        # deliberation, so low effort keeps the endpoint responsive - and is
-        # the recommended lever over disabling thinking outright.
-        output_config={"effort": "low"},
-        system=_SUMMARY_SYSTEM,
-        messages=[
-            {
-                "role": "user",
-                "content": f"Question: {query}\n\nWeather passages:\n\n{passages}",
-            }
-        ],
+    # A cache miss is the only path that spends money, so the ceiling is claimed
+    # here rather than at the top of the function.
+    _claim_budget()
+
+    client = anthropic.Anthropic(
+        timeout=SUMMARY_TIMEOUT, max_retries=SUMMARY_MAX_RETRIES
     )
+    try:
+        response = client.messages.create(
+            model=SUMMARY_MODEL,
+            max_tokens=1024,
+            # Thinking is on by default on this model. A grounded one-paragraph
+            # summary over passages that are already retrieved needs very little
+            # deliberation, so low effort keeps the endpoint responsive - and is
+            # the recommended lever over disabling thinking outright.
+            output_config={"effort": "low"},
+            system=_SUMMARY_SYSTEM,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"Question: {query}\n\nWeather passages:\n\n{passages}",
+                }
+            ],
+        )
+    except Exception:
+        # Nothing was generated, so nothing should be charged against the day.
+        _release_budget()
+        raise
 
     # Safety classifiers can decline a request, which arrives as a normal 200
     # with stop_reason "refusal" and no text - check before reading content.
+    # Deliberately outside the try above, so a refusal keeps its budget claim.
+    # A pre-output decline is not billed by the API, but a client retrying a
+    # refused query in a loop should still run into the daily ceiling.
     if response.stop_reason == "refusal":
         raise RuntimeError("the summary request was declined by the model's safety filters")
 
@@ -214,4 +355,6 @@ def summarize_results(query: str, results: list[dict]) -> str:
     ).strip()
     if not text:
         raise RuntimeError("the model returned no summary text")
+
+    _cache_put(cache_key, text)
     return text

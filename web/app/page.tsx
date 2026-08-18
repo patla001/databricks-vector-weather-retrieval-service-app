@@ -22,7 +22,9 @@ export default function Page() {
   const [query, setQuery] = useState("");
   const [topK, setTopK] = useState(8);
   const [sourceType, setSourceType] = useState<SourceType | null>(null);
-  const [summarize, setSummarize] = useState(true);
+  // Off by default: every summarized search is a model call, and most
+  // searches only want the ranked list.
+  const [summarize, setSummarize] = useState(false);
 
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);

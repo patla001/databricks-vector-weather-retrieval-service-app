@@ -49,6 +49,14 @@ DEFAULT_LOCATIONS = [
     if loc.strip()
 ]
 
+# A query goes into the summary prompt verbatim, so its length is billed as
+# input tokens. Unbounded, a pasted document is a single request costing dollars
+# rather than a fraction of a cent - and nothing about the app makes that
+# obvious to the person who pasted it. 500 characters is well past any real
+# weather question, and past what the 384-dim embedding model reads anyway
+# (it truncates at 512 tokens), so the cap costs no retrieval quality.
+MAX_QUERY_CHARS = 500
+
 MAX_LOCATIONS_PER_SYNC = 25
 MAX_SYNC_LIMIT = 500
 
@@ -337,6 +345,10 @@ def search_weather_post():
     if not isinstance(query, str) or not query.strip():
         return _bad_request("Missing required field: query (a non-empty string).")
     query = query.strip()
+    if len(query) > MAX_QUERY_CHARS:
+        return _bad_request(
+            f"query is {len(query)} characters; the maximum is {MAX_QUERY_CHARS}."
+        )
 
     raw_top_k = body.get("top_k", 5)
     if isinstance(raw_top_k, bool) or not isinstance(raw_top_k, (int, float, str)):
@@ -375,6 +387,10 @@ def search_weather_get():
     query = (request.args.get("query") or request.args.get("q") or "").strip()
     if not query:
         return _bad_request("Missing required query parameter: query")
+    if len(query) > MAX_QUERY_CHARS:
+        return _bad_request(
+            f"query is {len(query)} characters; the maximum is {MAX_QUERY_CHARS}."
+        )
 
     try:
         top_k = int(request.args.get("top_k", 5))
@@ -586,7 +602,15 @@ def weather_stats():
     """Row counts for both tables plus the unembedded backlog."""
     if not _embeddings_table_exists():
         return jsonify({"error": f"The {EMBEDDINGS_TABLE} table does not exist."}), 409
-    return jsonify(weather_pipeline.summarize())
+
+    stats = weather_pipeline.summarize()
+    # Imported here rather than at module scope: weather_search pulls in the
+    # ONNX runtime, and /weather/stats must stay cheap enough for the console
+    # to poll. By the time anyone reads these numbers a search has loaded it.
+    import weather_search
+
+    stats["summary"] = weather_search.summary_status()
+    return jsonify(stats)
 
 
 @app.route("/weather/refresh/status")
