@@ -13,6 +13,16 @@ Built on the same pattern as the day-2 ticker-news app — `lakebase.py` connect
 helper, `execute_values` + `%s::vector` writes, HNSW cosine index, `<=>` retrieval —
 against a new unstructured source.
 
+![The console: a semantic search for "dangerous heat and humidity", with every
+active US alert and forecast plotted on the globe](docs/screenshots/02-search.png)
+
+*One query, `"dangerous heat and humidity"`. The left rail ranks the corpus by
+cosine similarity — each hit showing its match percentage, a strength band and
+whether the weather itself is positive, negative or neutral. On the globe, the
+columns rising out of the surface are those same hits, their height being the
+similarity; everything else is the live corpus, each alert drawn at its own
+geography rather than at the city that fetched it.*
+
 ---
 
 ## In brief
@@ -407,6 +417,32 @@ behaviour bit the scheduled-job experiment.
 | **Answer card** | The RAG summary, above the evidence it was drawn from |
 | **Detail panel** | Full narrative, area description, issue/expiry, coordinates, and whether the footprint is a real polygon |
 | **Pipeline drawer** | Harvest, vectorize, scheduled refresh and index benchmark, each runnable with its result inline |
+
+
+### Screenshots
+
+**The corpus at rest** — no query yet. Every active alert nationwide plus a
+narrative forecast for 173 cities across all 50 states, DC and Puerto Rico.
+Colour is NWS severity; the blue dots are forecasts. The counts in the legend
+(`NEGATIVE 327 · NEUTRAL 536 · POSITIVE 637`) are the sentiment split.
+
+![The console with no query: the full corpus plotted nationwide](docs/screenshots/01-console.png)
+
+**A result opened.** The panel is the argument for two of the decisions on this
+page. `MATCHED PASSAGE · 72% MATCH · STRONG · COSINE 0.7181` shows the
+percentage, the calibrated band and the raw cosine together, so the friendly
+number never hides the real one. `FOOTPRINT: Centroid of the NWS zones it
+covers` is the map refusing to overstate its precision — this alert shipped no
+polygon, and the panel says so rather than implying the dot is exact.
+
+![A search result opened, showing the matched passage, outlook and footprint provenance](docs/screenshots/03-detail.png)
+
+**Sentiment as a filter.** Clicking `POSITIVE` isolates the benign weather — and
+the hazard markers that remain are the *current search hits*, which are never
+filtered out. Hiding a result the list beside it is still showing would break
+the link between the two halves of the page.
+
+![The positive sentiment filter applied, with search hits still visible](docs/screenshots/04-filter.png)
 
 ### Two things the data forced
 
