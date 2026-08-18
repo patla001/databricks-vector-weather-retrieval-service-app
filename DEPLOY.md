@@ -19,7 +19,7 @@ bills separately). Everything is CLI-driven; no UI step is required.
 | Secret | `database/weather-lakebase-url` |
 | App | `weather-vector-app` |
 | App URL | `https://weather-vector-app-2808874854650870.aws.databricksapps.com` |
-| Verification | `test_deployment.py` — **28 passed, 0 failed** |
+| Verification | `test_deployment.py` — **40 passed, 0 failed** |
 
 > ⚠️ **The two pre-existing apps (`lakebase-support-app`, `massive-lakebase-app`)
 > point at a database that no longer exists** — `massive-sync-db` was deleted, and
@@ -124,6 +124,21 @@ created columns, so you can confirm without a separate query.
 
 ## Step 4 — Create and deploy the app
 
+### Build the console first
+
+`GET /` serves a Next.js + three.js front end from `static/`. That directory is
+committed, so this step is only needed after changing anything under `web/` —
+but the sync ships whatever is in `static/` at the time, so build before you
+deploy:
+
+```bash
+cd web && npm install && npm run build && cd ..
+# -> copied 54 files (1.55 MB) -> static/
+```
+
+There is no Node in the app runtime, which is why the export is built here and
+committed rather than built on deploy.
+
 ```bash
 export DATABRICKS_CONFIG_PROFILE=DEFAULT
 APP=weather-vector-app
@@ -187,8 +202,11 @@ The app URL is **not public** — requests need your Databricks identity, which 
 why `test_deployment.py` attaches SDK auth headers:
 
 ```bash
-python test_deployment.py "$URL"      # expect: 26 passed, 0 failed
+python test_deployment.py "$URL"      # expect: 40 passed, 0 failed
 ```
+
+Open `$URL` in a browser for the console itself — the globe, the ranked
+results, and the pipeline drawer.
 
 Or drive it by hand (in a browser, already authenticated):
 
@@ -301,4 +319,8 @@ Deleting the instance is what stops the charge; deleting the app alone does not.
 | `409` from `/weather/search` | `weather_embeddings` doesn't exist; run `sql/02` |
 | Search returns `[]` after a successful sync | Documents are stored but not embedded — run the ingest job |
 | `PRINCIPAL_DOES_NOT_EXIST` on the grant | SQL was run in a Unity Catalog editor instead of the Lakebase query editor |
+| `/` returns JSON instead of the console | `static/` is missing or empty. Run `cd web && npm run build`, then re-sync. The JSON fallback is deliberate so the API stays usable from a plain checkout |
+| Console loads but the globe is blank | Check that `GET /static/geo.json` returns ~118 KB. It is written by `npm run build`, not committed by hand |
+| Console shows "Summary unavailable" | Expected without `ANTHROPIC_API_KEY`. See the commented opt-in in `app.yaml`; search itself is unaffected |
+| Console shows "the API returned a page instead of JSON" | The Databricks OAuth session expired. Reload to sign in again |
 | Deploy succeeds but the app won't start | Check `app.yaml`'s port handling — `DATABRICKS_APP_PORT` must win, and it does in `app.py`'s `__main__` block |

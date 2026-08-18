@@ -25,6 +25,7 @@ import lakebase
 from weather_pipeline import (
     DEFAULT_DOCUMENTS_TABLE,
     DEFAULT_EMBEDDINGS_TABLE,
+    thin_geometry,
     to_vector_literal,
 )
 
@@ -96,10 +97,12 @@ def search_weather(
     """
     vector = to_vector_literal(embed_query(query))
 
-    return lakebase.run_query(
+    rows = lakebase.run_query(
         f"""
         SELECT d.id,
                d.location,
+               d.latitude,
+               d.longitude,
                d.source_type,
                d.event,
                d.headline,
@@ -110,7 +113,14 @@ def search_weather(
                d.expires_at,
                e.chunk_index,
                e.chunk_text,
-               ROUND((1 - (e.embedding <=> %(vec)s::vector))::numeric, 4) AS similarity
+               -- The map draws the alert's real footprint where NWS published one.
+               -- Roughly a quarter of alerts are zone-based and carry no polygon;
+               -- those come back null and the UI falls back to the city point.
+               d.payload -> 'geometry' AS geometry,
+               -- ::float8 is load-bearing. numeric arrives as a Python Decimal,
+               -- which Flask serializes as a JSON *string* - so every consumer
+               -- would get "0.7051" and any arithmetic on it would fail.
+               ROUND((1 - (e.embedding <=> %(vec)s::vector))::numeric, 4)::float8 AS similarity
         FROM {EMBEDDINGS_TABLE} e
         JOIN {DOCUMENTS_TABLE} d ON d.id = e.document_id
         WHERE (%(source_type)s::text IS NULL OR e.source_type = %(source_type)s)
@@ -125,6 +135,13 @@ def search_weather(
             "top_k": clamp_top_k(top_k),
         },
     )
+
+    # Thin the polygons through the same function the map endpoint uses. The two
+    # responses feed the same globe, so a raw GeoJSON `coordinates` here and a
+    # thinned `rings` there is a shape mismatch waiting to break the caller.
+    for row in rows:
+        row["geometry"] = thin_geometry(row.get("geometry"))
+    return rows
 
 
 # ---------------------------------------------------------------------------

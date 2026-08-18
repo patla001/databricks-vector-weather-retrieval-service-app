@@ -16,7 +16,7 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from werkzeug.exceptions import HTTPException
 
 load_dotenv()
@@ -127,24 +127,57 @@ def healthz():
     return jsonify({"status": "ok"})
 
 
+# The built UI. `web/` holds the Next.js source; `npm run build` static-exports
+# it and copies the result here, so the app ships one artifact and Flask serves
+# the console from the same origin as the API it calls. Same origin is the
+# point: a Databricks App sits behind an OAuth proxy, and a UI hosted anywhere
+# else would have to solve cross-origin auth against a proxy that answers an
+# unauthenticated request with a login page rather than a 401.
+UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+
+def _api_index() -> dict:
+    return {
+        "service": "weather-intelligence",
+        "endpoints": {
+            "GET  /healthz": "liveness probe",
+            "GET  /api": "this document",
+            'POST /weather/sync': 'body: {"locations": ["Chicago, IL"], "limit": 50, '
+                                  '"sources": ["alert", "forecast"]}',
+            "POST /weather/search": 'body: {"query": "...", "top_k": 5, '
+                                    '"source_type": "alert"}',
+            "GET  /weather/search": "?query=...&top_k=5&source_type=alert&summarize=true",
+            "GET  /weather/map": "?source_type=alert&include_expired=false&limit=1000",
+            "GET  /weather/document/<id>": "one document in full",
+            "GET  /weather/stats": "row counts and the unembedded backlog",
+            "POST /weather/embed": 'body: {"limit": 200}',
+            "GET  /weather/refresh/status": "in-app scheduler state",
+            "POST /weather/refresh": "force one refresh cycle",
+            "POST /weather/benchmark": 'body: {"runs": 40, "top_k": 5} - HNSW vs seq scan',
+        },
+        "supported_locations": supported_cities(),
+        "coordinate_form": '"lat,lon" e.g. "41.88,-87.63"',
+        "ui": "built" if os.path.isfile(os.path.join(UI_DIR, "index.html")) else "not built",
+    }
+
+
 @app.route("/")
 def index():
+    """The console if it has been built, the API surface otherwise.
+
+    Falling back to JSON rather than 404ing keeps the API usable from a plain
+    checkout, where `static/` does not exist until someone runs the frontend
+    build.
+    """
+    if os.path.isfile(os.path.join(UI_DIR, "index.html")):
+        return send_from_directory(UI_DIR, "index.html")
+    return jsonify(_api_index())
+
+
+@app.route("/api")
+def api_index():
     """Point a browser at the app and get the API surface, not a 404."""
-    return jsonify(
-        {
-            "service": "weather-intelligence",
-            "endpoints": {
-                "GET  /healthz": "liveness probe",
-                "POST /weather/sync": 'body: {"locations": ["Chicago, IL"], "limit": 50, '
-                                      '"sources": ["alert", "forecast"]}',
-                "POST /weather/search": 'body: {"query": "...", "top_k": 5, '
-                                        '"source_type": "alert"}',
-                "GET  /weather/search": "?query=...&top_k=5&source_type=alert&summarize=true",
-            },
-            "supported_locations": supported_cities(),
-            "coordinate_form": '"lat,lon" e.g. "41.88,-87.63"',
-        }
-    )
+    return jsonify(_api_index())
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +441,144 @@ def embed_pending():
     )
     remaining = weather_pipeline.summarize()["pending"]
     return jsonify({**result, "model": weather_search.EMBED_MODEL, "remaining": remaining})
+
+
+# ---------------------------------------------------------------------------
+# Map view - the console's globe reads these
+# ---------------------------------------------------------------------------
+
+
+@app.route("/weather/map")
+def weather_map():
+    """Every current document with its geography, without the narrative bodies.
+
+        GET /weather/map?source_type=alert&include_expired=true&limit=1000
+
+    Where NWS published a warning polygon it is returned thinned to 3 decimals;
+    roughly a quarter of alerts are zone-based and carry none, so `geometry` is
+    null for those and the caller falls back to the point.
+    """
+    source_type = request.args.get("source_type")
+    if source_type is not None and source_type not in VALID_SOURCES:
+        return _bad_request(
+            f"source_type must be one of {list(VALID_SOURCES)}, got {source_type!r}."
+        )
+
+    include_expired = request.args.get("include_expired", "").lower() in {"1", "true", "yes"}
+    try:
+        limit = int(request.args.get("limit", 1000))
+    except (TypeError, ValueError):
+        return _bad_request('"limit" must be an integer.')
+
+    ensure_weather_documents_table()
+    features = weather_pipeline.map_features(
+        source_type=source_type, include_expired=include_expired, limit=limit
+    )
+    return jsonify(
+        {
+            "count": len(features),
+            "with_polygon": sum(1 for f in features if f.get("geometry")),
+            "include_expired": include_expired,
+            "source_type": source_type,
+            "features": features,
+        }
+    )
+
+
+@app.route("/weather/document/<path:doc_id>")
+def weather_document(doc_id: str):
+    """One document in full. Ids contain colons and dots, hence <path:>."""
+    ensure_weather_documents_table()
+    doc = weather_pipeline.get_document(doc_id)
+    if doc is None:
+        return jsonify({"error": f"No document with id {doc_id!r}."}), 404
+    return jsonify(doc)
+
+
+# ---------------------------------------------------------------------------
+# Index benchmark
+# ---------------------------------------------------------------------------
+
+
+@app.route("/weather/benchmark", methods=["POST"])
+def weather_benchmark():
+    """Compare the HNSW path against a forced sequential scan, live.
+
+    Body (optional): {"runs": 40, "top_k": 5}
+
+    Same method as scripts/benchmark_hnsw.py: rather than dropping and
+    rebuilding the index, it toggles the planner per transaction with
+    SET LOCAL enable_indexscan/enable_bitmapscan, which is reversible and
+    cannot leak into another session.
+
+    At this corpus size Postgres usually declines the index and sequentially
+    scans both ways - a few hundred rows are cheaper to scan than to descend a
+    graph for. The response reports the chosen plan node for each path so that
+    shows up as a fact rather than as a speedup that is not there.
+    """
+    body = request.json if request.is_json else {}
+    if not isinstance(body, dict):
+        return _bad_request("Request body must be a JSON object.")
+
+    try:
+        runs = max(4, min(int(body.get("runs", 40)), 200))
+        top_k = max(1, min(int(body.get("top_k", 5)), 20))
+    except (TypeError, ValueError):
+        return _bad_request('"runs" and "top_k" must be integers.')
+
+    if not _embeddings_table_exists():
+        return jsonify({"error": f"The {EMBEDDINGS_TABLE} table does not exist."}), 409
+    if weather_pipeline.summarize()["embeddings"] == 0:
+        return jsonify({"error": "No embeddings to benchmark. Run POST /weather/embed."}), 409
+
+    import statistics
+
+    import weather_search  # lazy: pulls in the ONNX runtime
+    from scripts.benchmark_hnsw import QUERIES, _explain, _time_queries
+
+    vectors = [
+        weather_pipeline.to_vector_literal(weather_search.embed_query(q)) for q in QUERIES
+    ]
+
+    def measure(use_index: bool) -> dict:
+        _time_queries(vectors, top_k, use_index, runs=min(runs, 8))  # warm the cache
+        timings = sorted(_time_queries(vectors, top_k, use_index, runs=runs))
+        plan = _explain(vectors[0], top_k, use_index)
+        node = next(
+            (line.strip() for line in plan if "Scan" in line), plan[0].strip() if plan else ""
+        )
+        return {
+            "p50_ms": round(statistics.median(timings), 2),
+            "p95_ms": round(timings[min(len(timings) - 1, int(len(timings) * 0.95))], 2),
+            "min_ms": round(timings[0], 2),
+            "max_ms": round(timings[-1], 2),
+            "runs": len(timings),
+            "plan_node": node,
+            "uses_index": "Index Scan" in " ".join(plan),
+            "plan": plan,
+        }
+
+    with_index = measure(True)
+    seq_scan = measure(False)
+    faster = seq_scan["p50_ms"] / with_index["p50_ms"] if with_index["p50_ms"] else 0.0
+
+    return jsonify(
+        {
+            "rows": weather_pipeline.summarize()["embeddings"],
+            "top_k": top_k,
+            "index_allowed": with_index,
+            "seqscan_forced": seq_scan,
+            "speedup_at_p50": round(faster, 2),
+            "verdict": (
+                f"HNSW is {faster:.2f}x faster at p50"
+                if with_index["uses_index"] and faster > 1.05
+                else "The planner chose a sequential scan either way - the corpus is "
+                     "too small for the index to pay for itself. Expected below a few "
+                     "thousand rows; scripts/benchmark_hnsw.py --synthetic 50000 shows "
+                     "the index winning once there is enough data."
+            ),
+        }
+    )
 
 
 @app.route("/weather/stats")

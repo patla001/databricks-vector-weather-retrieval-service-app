@@ -13,6 +13,7 @@ Exits non-zero on any failure, so it works as a CI gate.
 from __future__ import annotations
 
 import sys
+from urllib.parse import quote
 
 import requests
 from dotenv import load_dotenv
@@ -81,11 +82,26 @@ def main(base_url: str) -> int:
     check(r.status_code == 200, "GET /healthz", describe(r)
           + (" (Flask)" if served_by_flask else " (platform probe)"))
 
-    # The index route is app code on every host, so it is the real liveness
-    # check for the deployed service.
-    r = session.get(f"{base_url}/", timeout=30)
+    # /api is app code on every host, so it is the real liveness check for the
+    # deployed service. (It used to be "/", which now serves the console.)
+    r = session.get(f"{base_url}/api", timeout=30)
     check(r.status_code == 200 and "endpoints" in body(r),
-          "GET / (app is actually serving)", describe(r))
+          "GET /api (app is actually serving)", describe(r))
+    ui_built = body(r).get("ui") == "built"
+
+    # -- console -----------------------------------------------------------
+    # The console is a Next.js static export copied into static/. If it has not
+    # been built, "/" falls back to the JSON index rather than 404ing, so both
+    # states are legitimate - but say which one this deployment is in.
+    r = session.get(f"{base_url}/", timeout=30)
+    is_html = "text/html" in (r.headers.get("content-type") or "")
+    if ui_built:
+        check(r.status_code == 200 and is_html, "GET / serves the console", describe(r))
+        r = session.get(f"{base_url}/static/geo.json", timeout=30)
+        check(r.status_code == 200, "console map geometry is served", describe(r))
+    else:
+        check(r.status_code == 200 and not is_html,
+              "GET / falls back to the API index (console not built)", describe(r))
 
     # -- sync --------------------------------------------------------------
     before = weather_pipeline.summarize()
@@ -206,6 +222,41 @@ def main(base_url: str) -> int:
                         params={"query": "heat advisory", "top_k": 3}, timeout=120)
         check(r.status_code == 200 and body(r).get("count", 0) > 0,
               "GET /weather/search", describe(r))
+
+    # -- map view ----------------------------------------------------------
+    r = session.get(f"{base_url}/weather/map?limit=500", timeout=90)
+    if check(r.status_code == 200, "GET /weather/map", describe(r)):
+        features = body(r).get("features", [])
+        check(len(features) > 0, "  map returns features", f"{len(features)} feature(s)")
+        check(all(f.get("latitude") is not None for f in features),
+              "  every feature carries coordinates")
+        # Thinned polygons must use `rings`, the shape the console draws. A raw
+        # GeoJSON `coordinates` here renders nothing and throws client-side.
+        polygons = [f["geometry"] for f in features if f.get("geometry")]
+        check(all("rings" in g for g in polygons),
+              "  polygons are thinned to rings", f"{len(polygons)} polygon(s)")
+        check(all("narrative_text" not in f for f in features),
+              "  map payload omits narrative bodies")
+
+        if features:
+            doc_id = quote(features[0]["id"], safe="")
+            r = session.get(f"{base_url}/weather/document/{doc_id}", timeout=30)
+            if check(r.status_code == 200, "GET /weather/document/<id>", describe(r)):
+                check("narrative_text" in body(r), "  document carries the narrative")
+
+    # Search results have to be plottable, and in the same shape as the map's.
+    r = session.post(f"{base_url}/weather/search",
+                     json={"query": "flooding", "top_k": 5}, timeout=120)
+    if r.status_code == 200 and body(r).get("results"):
+        rows = body(r)["results"]
+        check(all(row.get("latitude") is not None for row in rows),
+              "search results carry coordinates (the globe needs them)")
+        check(all(isinstance(row["similarity"], (int, float)) for row in rows),
+              "similarity is a JSON number, not a string",
+              f"got {type(rows[0]['similarity']).__name__}")
+        geoms = [row["geometry"] for row in rows if row.get("geometry")]
+        check(all("rings" in g for g in geoms),
+              "search geometry matches the map's shape", f"{len(geoms)} polygon(s)")
 
     # -- edge cases --------------------------------------------------------
     r = session.post(f"{base_url}/weather/search", json={}, timeout=60)

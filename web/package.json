@@ -1,0 +1,27 @@
+{
+  "name": "weather-intelligence-console",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "geo": "node scripts/build-geo.mjs",
+    "build": "node scripts/build-geo.mjs && next build && node scripts/copy-out.mjs",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "^16.3.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "three": "0.180.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.0.7",
+    "@types/react-dom": "^19.0.3",
+    "@types/three": "0.180.0",
+    "topojson-client": "^3.1.0",
+    "typescript": "^5.7.3",
+    "us-atlas": "^3.0.1",
+    "world-atlas": "^2.0.2"
+  }
+}

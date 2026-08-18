@@ -48,3 +48,16 @@ venv/
 .idea/
 .vscode/
 *.swp
+
+# ---------------------------------------------------------------------------
+# Frontend
+# ---------------------------------------------------------------------------
+# web/ holds the Next.js source and has its own .gitignore for node_modules,
+# .next/ and out/.
+#
+# static/ is deliberately NOT ignored. It is the built console, and it has to
+# be committed: `databricks sync` respects this file, and a Databricks App runs
+# a Python runtime with no Node, so there is nowhere to run `next build` on the
+# far side of the sync. Committing the export is what makes the app one
+# deployable artifact. Rebuild it with `cd web && npm run build`.
+web/shot.mjs

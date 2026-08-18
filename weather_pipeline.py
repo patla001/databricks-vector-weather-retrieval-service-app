@@ -321,3 +321,128 @@ def summarize(
                       WHERE e.id IS NULL)                                             AS pending
             """)
             return dict(cur.fetchone())
+
+
+# ---------------------------------------------------------------------------
+# Map view
+# ---------------------------------------------------------------------------
+
+# Coordinates are rounded before they go over the wire. NWS publishes alert
+# polygons at 2-4 decimal places; 3 is ~110 m, far below one pixel at any globe
+# zoom the UI offers, and it cuts the payload roughly in half.
+_MAP_COORD_PRECISION = 3
+
+
+def _thin_ring(ring: list, precision: int = _MAP_COORD_PRECISION) -> list:
+    """Round a GeoJSON ring and drop points that round onto their neighbour."""
+    out = []
+    for point in ring:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            continue
+        try:
+            lon = round(float(point[0]), precision)
+            lat = round(float(point[1]), precision)
+        except (TypeError, ValueError):
+            continue
+        if out and out[-1] == [lon, lat]:
+            continue
+        out.append([lon, lat])
+    # A ring needs 4 points (first == last) to be a polygon at all. Below that,
+    # return nothing and let the caller fall back to the point marker.
+    return out if len(out) >= 4 else []
+
+
+def thin_geometry(geometry) -> dict | None:
+    """Shrink a GeoJSON Polygon/MultiPolygon for transport; None if unusable.
+
+    Only the outer ring survives. NWS alert polygons are simple hazard
+    footprints with no holes, and drawing interiors on a sphere buys nothing
+    the outline does not already say.
+    """
+    if not isinstance(geometry, dict):
+        return None
+    kind = geometry.get("type")
+    coords = geometry.get("coordinates")
+    if not isinstance(coords, list):
+        return None
+
+    if kind == "Polygon":
+        rings = [_thin_ring(coords[0])] if coords else []
+    elif kind == "MultiPolygon":
+        rings = [_thin_ring(poly[0]) for poly in coords if poly]
+    else:
+        return None
+
+    rings = [r for r in rings if r]
+    if not rings:
+        return None
+    return {"type": "MultiPolygon", "rings": rings}
+
+
+def map_features(
+    source_type: str | None = None,
+    include_expired: bool = False,
+    limit: int = 1000,
+    documents_table: str = DEFAULT_DOCUMENTS_TABLE,
+) -> list[dict]:
+    """Documents shaped for the globe: geography, labels, no narrative body.
+
+    narrative_text is deliberately left out - it is the bulk of a document and
+    the map only needs it once the user opens one, which GET /weather/document
+    serves. Sending it for every feature would multiply this response several
+    times over for text nothing on screen is showing.
+
+    Expired alerts are hidden by default. An alert whose expires_at has passed
+    is not a current hazard, and plotting it implies otherwise.
+    """
+    rows = lakebase.run_query(
+        f"""
+        SELECT id, location, latitude, longitude, source_type, event, headline,
+               severity, area_desc, issued_at, expires_at,
+               payload -> 'geometry' AS geometry
+        FROM {documents_table}
+        WHERE (%(source_type)s::text IS NULL OR source_type = %(source_type)s)
+          AND (%(include_expired)s OR expires_at IS NULL OR expires_at > now())
+        ORDER BY
+            -- Severe things first, so a truncated response keeps what matters.
+            CASE severity WHEN 'Extreme' THEN 0 WHEN 'Severe' THEN 1
+                          WHEN 'Moderate' THEN 2 WHEN 'Minor' THEN 3 ELSE 4 END,
+            issued_at DESC NULLS LAST
+        LIMIT %(limit)s
+        """,
+        {
+            "source_type": source_type,
+            "include_expired": include_expired,
+            "limit": max(1, min(int(limit), 5000)),
+        },
+    )
+
+    features = []
+    for row in rows:
+        feature = dict(row)
+        feature["geometry"] = thin_geometry(feature.get("geometry"))
+        if feature["latitude"] is not None:
+            feature["latitude"] = round(float(feature["latitude"]), 4)
+        if feature["longitude"] is not None:
+            feature["longitude"] = round(float(feature["longitude"]), 4)
+        features.append(feature)
+    return features
+
+
+def get_document(doc_id: str, documents_table: str = DEFAULT_DOCUMENTS_TABLE) -> dict | None:
+    """One document in full, including the narrative the map view omits."""
+    rows = lakebase.run_query(
+        f"""
+        SELECT id, location, latitude, longitude, source_type, event, headline,
+               narrative_text, severity, area_desc, issued_at, effective_at,
+               expires_at, synced_at, payload -> 'geometry' AS geometry
+        FROM {documents_table}
+        WHERE id = %(id)s
+        """,
+        {"id": doc_id},
+    )
+    if not rows:
+        return None
+    doc = dict(rows[0])
+    doc["geometry"] = thin_geometry(doc.get("geometry"))
+    return doc

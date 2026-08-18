@@ -189,6 +189,8 @@ request and the grid lookup. An unknown city returns a 400 listing every support
 | `test_deployment.py` | End-to-end test; verifies every write through the API *and* in Postgres |
 | `setup_secrets.py` | One-time write of the Lakebase DSN to `database/weather-lakebase-url` |
 | `sql/00`–`sql/03` | Role grant, both table DDLs, verification queries |
+| `web/` | Next.js + three.js console source; `npm run build` static-exports it into `static/` |
+| `static/` | The **built** console, committed so the app deploys as one artifact |
 | `DEPLOY.md` | Databricks Apps runbook — instance, secret, schema, deploy, teardown |
 
 ---
@@ -285,12 +287,75 @@ on conflict, so row counts stay flat.
 
 ---
 
+## The console
+
+`GET /` serves a Next.js + three.js front end, built into `static/` and served by
+the same Flask process as the API.
+
+**Same origin is the whole design.** A Databricks App sits behind an OAuth proxy
+that answers an unauthenticated request with its *sign-in page as HTTP 200
+`text/html`* rather than a 401. A UI hosted anywhere else would have to solve
+cross-origin auth against that; served from Flask, every `fetch("/weather/...")`
+inherits the session cookie the browser already has. The API client still checks
+the response content-type and says "the session has expired" rather than letting
+the failure surface as a JSON parse error, which is exactly how that proxy
+behaviour bit the scheduled-job experiment.
+
+### What it shows
+
+| | |
+|---|---|
+| **Globe** | Documents plotted on a 3D Earth. Where NWS published a warning polygon, the real footprint is drawn; the rest fall back to the city point |
+| **Relevance as altitude** | Each search hit raises a column whose height is its cosine similarity and whose colour is its NWS severity |
+| **Ranked list** | Rank, similarity to 4dp, severity bar, location, and the matched chunk |
+| **Answer card** | The RAG summary, above the evidence it was drawn from |
+| **Detail panel** | Full narrative, area description, issue/expiry, coordinates, and whether the footprint is a real polygon |
+| **Pipeline drawer** | Harvest, vectorize, scheduled refresh and index benchmark, each runnable with its result inline |
+
+### Two things the data forced
+
+**Documents carry the coordinate of the city they were fetched for, not the area
+they cover.** All 450+ rows share five coordinates. So the globe prefers a
+polygon's centroid over the stored latitude/longitude — a warning fetched for
+"Chicago, IL" routinely covers southern Illinois — and fans hits that still
+share a point around it, so eight Denver results read as eight bars rather than
+one blob. Roughly a quarter of alerts are zone-based with no polygon; the detail
+panel says so rather than implying a precision the data does not have.
+
+**Vertical columns are invisible from directly overhead.** The camera opens
+south of the continental US and stays oblique when it flies to a selection,
+because the axis carrying the meaning is the one a top-down view collapses.
+
+### Building it
+
+```bash
+cd web
+npm install
+npm run build      # geo.json -> next build -> copy the export into ../static
+```
+
+The build output is committed on purpose. `databricks sync` respects
+`.gitignore`, and a Databricks App runs a Python runtime with no Node, so there
+is nowhere to run `next build` on the far side of the sync.
+
+`npm run build` also regenerates `public/geo.json` from the `world-atlas` and
+`us-atlas` TopoJSON packages, decimating them to 116 KiB of plain polylines so
+the browser never loads a TopoJSON decoder.
+
+> The **answer card needs `ANTHROPIC_API_KEY`**. Without it the console shows
+> "Summary unavailable" and the ranked results are unaffected — the summary is
+> an extra that must never take retrieval down. `app.yaml` carries the commented
+> two-line opt-in and the `databricks secrets` command that enables it.
+
+---
+
 ## Endpoints
 
 | Method | Path | Notes |
 |---|---|---|
 | `GET` | `/healthz` | Liveness probe |
-| `GET` | `/` | API surface + the list of supported city names |
+| `GET` | `/` | The console (Next.js + three.js). Falls back to the API index when it has not been built |
+| `GET` | `/api` | API surface + the list of supported city names |
 | `POST` | `/weather/sync` | `{"locations": [...], "limit": 50, "sources": ["alert","forecast"]}` — all optional |
 | `POST` | `/weather/search` | `{"query": "...", "top_k": 5, "source_type": "alert", "location": "Chicago, IL"}` |
 | `GET` | `/weather/search` | `?query=…&top_k=5&source_type=alert&summarize=true` |
@@ -298,6 +363,9 @@ on conflict, so row counts stay flat.
 | `POST` | `/weather/embed` | Embed pending documents; `{"limit": 200}` optional |
 | `GET` | `/weather/refresh/status` | Scheduler health: cycles, failures, last result |
 | `POST` | `/weather/refresh` | Force one refresh cycle now (409 if one is running) |
+| `GET` | `/weather/map` | Every current document with its geography, no narrative bodies; `?source_type=&include_expired=&limit=` |
+| `GET` | `/weather/document/<id>` | One document in full, including the narrative |
+| `POST` | `/weather/benchmark` | HNSW vs. forced sequential scan, live; `{"runs": 40, "top_k": 5}` |
 
 ### `POST /weather/search`
 

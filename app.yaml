@@ -71,5 +71,30 @@ env:
   - name: WEATHER_PURGE_EXPIRED_DAYS
     value: "7"
 
+  # --- Optional: the RAG summary ----------------------------------------------
+  # GET /weather/search?summarize=true asks Claude for a paragraph grounded in
+  # the retrieved passages, which the console renders above the ranked list.
+  # Leave this off and search still works - the console shows "Summary
+  # unavailable" and the results are unaffected.
+  #
+  # To turn it on, store the key and attach it as an app resource, then
+  # uncomment the two lines below and redeploy:
+  #
+  #   databricks secrets put-secret database anthropic-api-key
+  #   databricks apps update weather-vector-app --json '{
+  #     "name": "weather-vector-app",
+  #     "resources": [
+  #       {"name": "weather-lakebase-url",
+  #        "secret": {"scope": "database", "key": "weather-lakebase-url", "permission": "READ"}},
+  #       {"name": "anthropic-api-key",
+  #        "secret": {"scope": "database", "key": "anthropic-api-key", "permission": "READ"}}
+  #     ]}'
+  #
+  # Kept commented rather than pointing at a resource that may not exist: an
+  # unresolvable valueFrom is a deploy-time problem, and the summary is an
+  # extra that must never be able to take the API down.
+  # - name: ANTHROPIC_API_KEY
+  #   valueFrom: anthropic-api-key
+
   - name: FLASK_DEBUG
     value: "0"
