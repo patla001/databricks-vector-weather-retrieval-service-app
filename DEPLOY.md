@@ -359,7 +359,7 @@ Deleting the instance is what stops the charge; deleting the app alone does not.
 | Console loads but the globe is blank | Check that `GET /static/geo.json` returns ~118 KB. It is written by `npm run build`, not committed by hand |
 | Console shows "Summary unavailable" | Expected without `ANTHROPIC_API_KEY`. See the commented opt-in in `app.yaml`; search itself is unaffected |
 | Summaries stop partway through the day | The daily ceiling was reached. `GET /weather/stats` -> `summary.throttled_today`. Raise `WEATHER_SUMMARY_DAILY_LIMIT` or wait for 00:00 UTC; search is unaffected |
-| `query is N characters; the maximum is 500` | Working as intended — an unbounded query is billed as summary input tokens. See "Cost guardrails" in README_WEATHER.md |
+| `query is N characters; the maximum is 500` | Working as intended — an unbounded query is billed as summary input tokens. See "Cost guardrails" in README.md |
 | Console shows "the API returned a page instead of JSON" | The Databricks OAuth session expired. Reload to sign in again |
 | Job dies with `Fatal error: The Python kernel is unresponsive` | `psycopg2-binary` reached a serverless task. Pass `--db-driver pg8000` and keep psycopg2 out of the job's `dependencies` — its bundled OpenSSL collides with the kernel's on the first TLS handshake |
 | Deploy succeeds but the app won't start | Check `app.yaml`'s port handling — `DATABRICKS_APP_PORT` must win, and it does in `app.py`'s `__main__` block |
