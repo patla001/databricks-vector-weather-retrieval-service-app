@@ -292,7 +292,46 @@ button, input, select, textarea { font: inherit; color: inherit; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.hit-sim { font-family: var(--mono); font-size: 11.5px; color: var(--muted); flex-shrink: 0; }
+.hit-sim {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--paper);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+/* The unit sits smaller than the number so the eye lands on the digits when
+   scanning a column of results. */
+.hit-sim em { font-style: normal; font-size: 9.5px; color: var(--faint); margin-left: 1px; }
+
+/* Sentiment and match-strength chips. */
+.hit-tags {
+  margin: 0 0 0 26px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.tag-sentiment,
+.tag-band {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 2px;
+  border: 1px solid var(--line-soft);
+  color: var(--faint);
+  white-space: nowrap;
+}
+.tag-sentiment { display: inline-flex; align-items: center; gap: 4px; }
+.tag-sentiment i { font-style: normal; font-size: 8px; line-height: 1; }
+/* Colour carried on a data attribute rather than inline styles so the three
+   states stay defined in one place and can be restyled without touching TSX. */
+.tag-sentiment[data-sentiment="positive"] { color: #4ade80; border-color: #4ade8055; background: #4ade800f; }
+.tag-sentiment[data-sentiment="negative"] { color: #f87171; border-color: #f8717155; background: #f871710f; }
+.tag-sentiment[data-sentiment="neutral"]  { color: #94a3b8; border-color: #94a3b844; background: #94a3b80f; }
 
 /* Similarity as a bar, so the ranking is scannable without reading numbers.
    The scale is anchored at 0 rather than at the range of the visible hits:
@@ -320,6 +359,49 @@ button, input, select, textarea { font: inherit; color: inherit; }
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+
+/* Sentiment chips in the legend double as filters, so they need affordance:
+   a button reset, a hover lift, and a clear on-state. */
+.legend-rule {
+  width: 1px;
+  height: 12px;
+  background: var(--line-soft);
+  margin: 0 2px;
+  flex-shrink: 0;
+}
+.legend-filter {
+  font: inherit;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 2px 6px;
+  cursor: pointer;
+  color: inherit;
+  transition: background 120ms ease, border-color 120ms ease, opacity 120ms ease;
+}
+.legend-filter:hover { background: #ffffff0f; border-color: var(--line-soft); }
+.legend-filter[data-on="true"] { background: #ffffff1a; border-color: var(--line); }
+.legend-filter b {
+  font-weight: 600;
+  font-size: 9.5px;
+  color: var(--faint);
+  margin-left: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.legend-filter[data-on="true"] b { color: var(--paper); }
+
+/* Sentiment line in the globe hover tooltip. */
+.tip-sentiment {
+  display: block;
+  margin-top: 3px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.tip-sentiment[data-sentiment="positive"] { color: #4ade80; }
+.tip-sentiment[data-sentiment="negative"] { color: #f87171; }
+.tip-sentiment[data-sentiment="neutral"]  { color: #94a3b8; }
 
 /* --- detail panel -------------------------------------------------------- */
 

@@ -15,6 +15,94 @@ against a new unstructured source.
 
 ---
 
+## In brief
+
+The four questions, answered directly. Every claim here is expanded further down.
+
+### Which data source, and why
+
+**The National Weather Service API** (`api.weather.gov`). No API key, no signup, no
+rate-limit tier — and, unlike most free weather APIs, it publishes genuine
+**free text** rather than only numbers. Two document types are harvested:
+
+| Source | Endpoint | The text that gets embedded |
+|---|---|---|
+| Alerts | `/alerts/active` | `description` + `instruction` — the long-form hazard narrative |
+| Forecasts | `/gridpoints/{office}/{x},{y}/forecast` | one `detailedForecast` per period |
+
+I measured before committing to it: across 464 live alerts the narrative ran to a
+median of 682 characters and a maximum of 9116, so there is real prose to chunk.
+The **hourly** forecast endpoint is deliberately unused — its `detailedForecast`
+is empty, leaving nothing worth embedding.
+
+### Schema decisions
+
+**Two tables** (`sql/01`, `sql/02`), plus a small zone-centroid cache (`sql/04`).
+
+| Decision | Why |
+|---|---|
+| `id` is the natural key — `alert:urn:oid:…` / `forecast:{grid}:{start}` | NWS ids are already globally unique and stable, so upsert dedup needs no hashing. Forecast ids key on period *start*, not number: the numbers shift as periods roll off |
+| `text_hash` on documents | NWS revises alerts in place. On an upsert where the hash changed, that document's embedding rows are deleted so the anti-join re-embeds them. Without it, search serves vectors of text the API no longer publishes |
+| `source_type` denormalized onto `weather_embeddings` | Lets a filtered search discard rows before the join rather than after |
+| `geo_source` on documents | Records whether coordinates came from the alert's own polygon, its zones, or its state — four alerts in five ship no polygon |
+| FK with `ON DELETE CASCADE` | Purging an expired alert takes its vectors with it, so orphans cannot accumulate |
+| **Chunking: 800 chars, 100 overlap** | Measured, not guessed: 42% of alerts exceed 800 characters and split; forecasts top out near 260 and are always exactly one chunk, so the parameters cost them nothing. The overlap keeps a hazard sentence from being cut across a boundary |
+| **Model: `all-MiniLM-L6-v2`, 384 dimensions** | Served through `fastembed`/ONNX rather than `sentence-transformers` — same weights, same vectors, without ~2.5 GB of torch in the image |
+| Index: `hnsw (embedding vector_cosine_ops)`, queried with `<=>` | Cosine matches how the model was trained |
+
+### Running it end to end
+
+```bash
+uv venv && uv pip install -r requirements.txt
+cp .env.example .env            # then set LAKEBASE_URL
+
+# schema: paste sql/01, sql/02 (and sql/04) into the Lakebase SQL editor
+python app.py                                    # serves on :8000
+
+# 1. sync   — harvest NWS into weather_documents
+curl -sXPOST localhost:8000/weather/sync -H 'content-type: application/json' \
+     -d '{"locations":["Chicago, IL","Austin, TX"],"limit":50}'
+
+# 2. embed  — chunk + vectorize everything not yet embedded
+python notebooks/ingest_weather_embeddings.py    # or: curl -sXPOST localhost:8000/weather/embed
+
+# 3. search — semantic retrieval
+curl -sXPOST localhost:8000/weather/search -H 'content-type: application/json' \
+     -d '{"query":"flash flood risk this weekend","top_k":5}'
+
+# with the RAG summary (needs ANTHROPIC_API_KEY)
+curl -s 'localhost:8000/weather/search?query=severe+thunderstorm&summarize=true'
+
+python test_deployment.py http://localhost:8000  # 54 checks, API + direct SQL
+```
+
+All three steps are idempotent: re-running sync does not duplicate documents, and
+re-running the embed job collides on the chunk primary key instead of inserting
+second copies. `weather_refresh.py` runs all three as one cycle, which is what the
+in-app timer and the daily Databricks Job both call.
+
+### Known limitations
+
+- **The city list is fixed at 173.** All 50 states, DC and PR are covered and every
+  coordinate was verified against NWS, but "Ames, IA" still will not resolve —
+  `"lat,lon"` is the workaround. A geocoder is the real fix. This caps the forecast
+  layer only; alerts are harvested nationally.
+- **A zone-anchored alert is a centroid, not a footprint.** Honest but coarse for a
+  statewide alert; `geo_source` says so, and drawing the union of zone polygons
+  would be exact at ~26 KB of geometry per zone.
+- **Chunking is character-based, not token-aware.** A token-aware splitter would
+  pack chunks more evenly against the model's window.
+- **No reranker.** Single-stage cosine retrieval. Scores cluster in the 0.4–0.6 band
+  even for good hits, so they rank well but should not be thresholded without
+  calibration.
+- **Sentiment is rule-based.** It reads the NWS controlled vocabulary and a weighted
+  lexicon, which is why "Sunny, high near 100" is correctly negative — but it is
+  rules, and unusual phrasing will slip past it.
+- **No auth on the write endpoints.** Behind Databricks Apps they inherit workspace
+  SSO; standalone, `/weather/sync` should require something.
+
+---
+
 ## Results
 
 | | |
@@ -27,7 +115,7 @@ against a new unstructured source.
 | Embedding model | `sentence-transformers/all-MiniLM-L6-v2`, **384 dims** |
 | Distinct models in the table | **1** |
 | Index | `hnsw (embedding vector_cosine_ops)` |
-| End-to-end test | **50 passed, 0 failed** (local and against the deployed app) |
+| End-to-end test | **54 passed, 0 failed** (local and against the deployed app) |
 | Deployed | `weather-vector-app` on Databricks Apps, backed by the `weather-vector-db` Lakebase instance |
 | Alert coverage | **Nationwide** — one `/alerts/active` request, every state and territory |
 | Forecast coverage | **173 cities** across all 50 states, DC and Puerto Rico |
@@ -313,7 +401,9 @@ behaviour bit the scheduled-job experiment.
 |---|---|
 | **Globe** | Documents plotted on a 3D Earth at their own geography — the published warning polygon where there is one, the centroid of the alert's NWS zones otherwise |
 | **Relevance as altitude** | Each search hit raises a column whose height is its cosine similarity and whose colour is its NWS severity |
-| **Ranked list** | Rank, similarity to 4dp, severity bar, location, and the matched chunk |
+| **Ranked list** | Rank, **match percentage**, severity bar, a **sentiment chip**, location, and the matched chunk |
+| **Sentiment** | Whether the *weather* is positive, negative or neutral — derived from the NWS severity/event vocabulary for alerts and a weighted lexicon plus temperature for forecasts. The legend chips double as filters |
+| **Idle motion** | The globe drifts when untouched and stops the moment you interact; Extreme and Severe alerts pulse, driven by one shader uniform rather than a per-frame traversal |
 | **Answer card** | The RAG summary, above the evidence it was drawn from |
 | **Detail panel** | Full narrative, area description, issue/expiry, coordinates, and whether the footprint is a real polygon |
 | **Pipeline drawer** | Harvest, vectorize, scheduled refresh and index benchmark, each runnable with its result inline |
@@ -339,6 +429,23 @@ not have.
 **Vertical columns are invisible from directly overhead.** The camera opens
 south of the continental US and stays oblique when it flies to a selection,
 because the axis carrying the meaning is the one a top-down view collapses.
+
+### Similarity is shown as a percentage, not rescaled
+
+A hit reads `72%`, which is the raw cosine, not a curve fitted to the result set.
+Rescaling so the best hit always reads 100% would have hidden the distinction the
+number exists to carry: a good query tops out around 0.59 while a deliberately
+irrelevant one ("recipe for bread") still returns 0.19. The qualitative band
+beside it — strong / good / weak / distant — is calibrated against those measured
+scores, and the exact 4-decimal cosine is in the tooltip for anyone who wants it.
+
+### The map was slow for a reason that had nothing to do with the map
+
+`GET /weather/map` took ~12s. The database answers the query in **23 ms**. The rest
+was `ensure_weather_documents_table()` running on every request: five DDL
+statements, each opening its own TLS connection to a remote Postgres. Running the
+schema check once per process and warming it in a daemon thread at startup took
+the endpoint to **2.7s cold**, and none of that required touching the query.
 
 ### Building it
 

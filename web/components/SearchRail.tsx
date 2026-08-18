@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { colorOf } from "@/lib/severity";
+import { SENTIMENT_STYLE, matchBand, matchPercent, sentimentOf } from "@/lib/sentiment";
 import type { SearchResponse, SearchHit, SourceType } from "@/lib/types";
 
 interface Props {
@@ -218,6 +219,7 @@ function ResultRow({
   onHover: (id: string | null) => void;
 }) {
   const color = colorOf(hit);
+  const tone = SENTIMENT_STYLE[sentimentOf(hit)];
   return (
     <button
       type="button"
@@ -235,10 +237,24 @@ function ResultRow({
         <span className="hit-event" style={{ color }}>
           {hit.event ?? hit.location}
         </span>
-        <span className="hit-sim">{hit.similarity.toFixed(4)}</span>
+        <span
+          className="hit-sim"
+          title={`Cosine similarity ${hit.similarity.toFixed(4)} — a ${matchBand(hit.similarity)} match`}
+        >
+          {matchPercent(hit.similarity)}<em>%</em>
+        </span>
       </div>
       <div className="hit-bar">
         <i style={{ width: `${Math.max(2, hit.similarity * 100)}%`, background: color }} />
+      </div>
+      <div className="hit-tags">
+        <span className="tag-sentiment" data-sentiment={sentimentOf(hit)} title={tone.hint}>
+          <i aria-hidden="true">{tone.glyph}</i>
+          {tone.label}
+        </span>
+        <span className="tag-band" title="How close this chunk is to the query, in cosine distance">
+          {matchBand(hit.similarity)} match
+        </span>
       </div>
       <div className="hit-meta">
         <i className="dot" style={{ background: color }} />

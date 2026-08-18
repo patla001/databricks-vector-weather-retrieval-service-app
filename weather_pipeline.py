@@ -26,6 +26,7 @@ import os
 from typing import Callable, Sequence
 
 import lakebase
+import weather_sentiment
 from lakebase import execute_values
 
 logger = logging.getLogger(__name__)
@@ -425,6 +426,10 @@ def map_features(
     for row in rows:
         feature = dict(row)
         feature["geometry"] = thin_geometry(feature.get("geometry"))
+        # Derived here rather than stored: it is a pure function of columns the
+        # row already carries, so it needs no migration and stays correct for
+        # documents harvested before the classifier existed.
+        weather_sentiment.annotate(feature, text_key="headline")
         if feature["latitude"] is not None:
             feature["latitude"] = round(float(feature["latitude"]), 4)
         if feature["longitude"] is not None:
@@ -449,4 +454,5 @@ def get_document(doc_id: str, documents_table: str = DEFAULT_DOCUMENTS_TABLE) ->
         return None
     doc = dict(rows[0])
     doc["geometry"] = thin_geometry(doc.get("geometry"))
+    weather_sentiment.annotate(doc)
     return doc

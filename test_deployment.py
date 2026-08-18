@@ -250,6 +250,8 @@ def main(base_url: str) -> int:
                   f"{len(points)} distinct point(s) for {len(alerts)} alert(s)")
             check(all(f.get("geo_source") for f in alerts),
                   "  every alert records how it was anchored")
+            check(all(f.get("sentiment") for f in features),
+                  "  every map feature carries a sentiment")
             sources = {f.get("geo_source") for f in alerts}
             check(sources <= {"polygon", "zone", "state", "point"},
                   "  anchor provenance uses known values", f"{sorted(sources)}")
@@ -286,6 +288,30 @@ def main(base_url: str) -> int:
               "search geometry matches the map's shape", f"{len(geoms)} polygon(s)")
         check(all("geo_source" in row for row in rows),
               "search results carry anchor provenance")
+        tones = {row.get("sentiment") for row in rows}
+        check(tones <= {"positive", "negative", "neutral"} and None not in tones,
+              "search results carry a sentiment", f"{sorted(t for t in tones if t)}")
+
+    # Sentiment has to track the weather, not the prose. These two queries are
+    # the ones a keyword classifier gets wrong: a hazard bulletin is written
+    # calmly, and "sunny, high near 100" is cheerful text about dangerous heat.
+    r = session.post(f"{base_url}/weather/search",
+                     json={"query": "dangerous heat advisory", "top_k": 5,
+                           "source_type": "alert"}, timeout=120)
+    if r.status_code == 200 and body(r).get("results"):
+        rows = body(r)["results"]
+        negative = sum(1 for x in rows if x.get("sentiment") == "negative")
+        check(negative >= len(rows) - 1,
+              "hazard alerts read as negative", f"{negative}/{len(rows)}")
+
+    r = session.post(f"{base_url}/weather/search",
+                     json={"query": "clear mild pleasant evening", "top_k": 5,
+                           "source_type": "forecast"}, timeout=120)
+    if r.status_code == 200 and body(r).get("results"):
+        rows = body(r)["results"]
+        positive = sum(1 for x in rows if x.get("sentiment") == "positive")
+        check(positive >= 1, "benign forecasts can read as positive",
+              f"{positive}/{len(rows)}")
 
     # -- edge cases --------------------------------------------------------
     r = session.post(f"{base_url}/weather/search", json={}, timeout=60)

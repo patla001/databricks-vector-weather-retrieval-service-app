@@ -7,8 +7,9 @@ import PipelinePanel from "@/components/PipelinePanel";
 import SearchRail from "@/components/SearchRail";
 import { api, ApiError } from "@/lib/api";
 import { FORECAST_COLOR, SEVERITY_COLORS } from "@/lib/severity";
+import { SENTIMENT_STYLE, sentimentOf } from "@/lib/sentiment";
 import type {
-  Feature, MapResponse, RefreshStatus, SearchResponse, SourceType, Stats,
+  Feature, MapResponse, RefreshStatus, SearchResponse, Sentiment, SourceType, Stats,
 } from "@/lib/types";
 
 // WebGL has no server-side equivalent, and this page is statically exported, so
@@ -41,6 +42,9 @@ export default function Page() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [pipelineOpen, setPipelineOpen] = useState(false);
   const [includeExpired, setIncludeExpired] = useState(false);
+  // Null means "show everything". Clicking a legend chip isolates that class,
+  // clicking it again clears the filter.
+  const [sentimentFilter, setSentimentFilter] = useState<Sentiment | null>(null);
 
   const loadCorpus = useCallback(async () => {
     try {
@@ -126,8 +130,19 @@ export default function Page() {
     const merged = new Map<string, Feature>();
     for (const feature of map?.features ?? []) merged.set(feature.id, feature);
     for (const hit of hits) if (!merged.has(hit.id)) merged.set(hit.id, hit);
-    return [...merged.values()];
-  }, [map, hits]);
+    const all = [...merged.values()];
+    if (!sentimentFilter) return all;
+    // Search hits are never filtered out: hiding a result the list is still
+    // showing would break the link between the two halves of the page.
+    const hitIds = new Set(hits.map((h) => h.id));
+    return all.filter((f) => hitIds.has(f.id) || sentimentOf(f) === sentimentFilter);
+  }, [map, hits, sentimentFilter]);
+
+  const sentimentCounts = useMemo(() => {
+    const counts: Record<Sentiment, number> = { positive: 0, negative: 0, neutral: 0 };
+    for (const feature of map?.features ?? []) counts[sentimentOf(feature)] += 1;
+    return counts;
+  }, [map]);
 
   const selectedHit = hits.find((hit) => hit.id === selectedId) ?? null;
   const lastRun = refresh?.last_finished_at ? new Date(refresh.last_finished_at) : null;
@@ -255,10 +270,29 @@ export default function Page() {
           <i style={{ background: FORECAST_COLOR }} />
           <span>Forecast</span>
         </div>
+
+        <span className="legend-rule" />
+
+        {(["negative", "neutral", "positive"] as Sentiment[]).map((tone) => (
+          <button
+            type="button"
+            key={tone}
+            className="legend-item legend-filter"
+            data-on={sentimentFilter === tone}
+            title={`${SENTIMENT_STYLE[tone].hint} — ${sentimentCounts[tone]} on the globe. Click to isolate.`}
+            onClick={() => setSentimentFilter(sentimentFilter === tone ? null : tone)}
+          >
+            <i style={{ background: SENTIMENT_STYLE[tone].color }} />
+            <span>{SENTIMENT_STYLE[tone].label}</span>
+            <b>{sentimentCounts[tone]}</b>
+          </button>
+        ))}
       </div>
 
       <div className="hud-hint">
-        drag to rotate · scroll to zoom
+        {sentimentFilter
+          ? `showing ${sentimentFilter} only · click the chip again to clear`
+          : "drag to rotate · scroll to zoom"}
         <br />
         bar height = cosine similarity
       </div>

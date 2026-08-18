@@ -14,6 +14,7 @@ os.environ at import time, so the .env overrides have to exist first.
 
 import logging
 import os
+import threading
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
@@ -67,14 +68,39 @@ MAX_LOCATIONS_PER_SYNC = int(os.environ.get("WEATHER_MAX_LOCATIONS", "200"))
 MAX_SYNC_LIMIT = 500
 
 
-def ensure_weather_documents_table():
+# The schema cannot change under a running process, so the self-heal only needs
+# to happen once. It used to run on every request: five statements, and because
+# lakebase opens a fresh TLS connection per statement, five round-trips to a
+# remote Postgres. That was ~10 of the ~12 seconds GET /weather/map took, and it
+# was pure overhead on a query the database itself answers in 23 ms.
+_schema_ready = False
+_schema_lock = threading.Lock()
+
+
+def ensure_weather_documents_table(force: bool = False):
     """Create the raw weather-documents table if it doesn't exist yet.
 
     Mirrors sql/01_setup_weather_documents.sql so a fresh deploy self-heals.
     The embeddings table is deliberately NOT created here: CREATE EXTENSION and
     the HNSW index are privileged one-time DDL that a least-privilege app role
     generally can't run, so sql/02 stays a manual step.
+
+    Runs its DDL at most once per process. `force=True` re-runs it, which is
+    what a test that has just dropped the table needs.
     """
+    global _schema_ready
+    if _schema_ready and not force:
+        return
+    with _schema_lock:
+        # Re-check inside the lock: several requests can arrive at once on a
+        # cold process, and without this they would all run the DDL.
+        if _schema_ready and not force:
+            return
+        _ensure_schema()
+        _schema_ready = True
+
+
+def _ensure_schema():
     lakebase.run_write(
         f"""
         CREATE TABLE IF NOT EXISTS {DOCUMENTS_TABLE} (
@@ -109,6 +135,7 @@ def ensure_weather_documents_table():
             f"ON {DOCUMENTS_TABLE} ({column})"
         )
     weather_zones.ensure_zones_table()
+    logger.info("schema verified")
 
 
 def _embeddings_table_exists() -> bool:
@@ -718,8 +745,32 @@ def _start_scheduler():
             logger.exception("could not start the refresh scheduler")
 
 
-# Started at import so it runs under a WSGI server (which never executes the
+def _warm_schema():
+    """Run the one-time schema check off the request path.
+
+    Without this the *first* visitor pays for it - five DDL statements, each on
+    its own TLS connection to a remote Postgres, which measured ~11s. Doing it
+    in a daemon thread at startup means the work overlaps with boot and is
+    finished before anyone arrives. A request that does beat it still blocks on
+    the same lock rather than duplicating the work, so this is an optimisation,
+    not a second code path.
+    """
+    if os.environ.get("WERKZEUG_RUN_MAIN") != "true" and app.debug:
+        return
+
+    def run():
+        try:
+            ensure_weather_documents_table()
+        except Exception:
+            # Deferred to the first request, which reports errors properly.
+            logger.exception("schema warm-up failed; will retry on first request")
+
+    threading.Thread(target=run, name="schema-warmup", daemon=True).start()
+
+
+# Started at import so they run under a WSGI server (which never executes the
 # __main__ block below), not just under `python app.py`.
+_warm_schema()
 _start_scheduler()
 
 

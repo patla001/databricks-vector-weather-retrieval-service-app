@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLOBE_RADIUS, anchorOf, toVector3 } from "@/lib/geo";
+import { SENTIMENT_STYLE, sentimentOf } from "@/lib/sentiment";
 import type { GeoLines } from "@/lib/geo";
 import { colorOf } from "@/lib/severity";
 import type { Feature, SearchHit } from "@/lib/types";
@@ -11,6 +12,9 @@ import type { Feature, SearchHit } from "@/lib/types";
 // public/ files are not rewritten by assetPrefix, so the prefix has to be
 // applied by hand: in production Flask mounts the export under /static.
 const ASSET_PREFIX = process.env.NEXT_PUBLIC_ASSET_PREFIX ?? "";
+
+// Seconds of stillness before the globe starts drifting again.
+const IDLE_RESUME_SECONDS = 3.5;
 
 interface Props {
   features: Feature[];
@@ -54,6 +58,9 @@ export default function Globe({
   const markerCloud = useRef<THREE.Points | null>(null);
   const placed = useRef<Placed[]>([]);
   const flight = useRef<{ from: THREE.Vector3; to: THREE.Vector3; t: number } | null>(null);
+  // Drives the idle-drift decision in the animation loop.
+  const lastInteraction = useRef(0);
+  const hovering = useRef(false);
 
   // Latest callbacks, read from the animation loop without re-binding listeners.
   const handlers = useRef({ onSelect, onHover });
@@ -95,7 +102,71 @@ export default function Globe({
     c.minDistance = 1.25;
     c.maxDistance = 5.5;
     c.zoomSpeed = 0.7;
+    // Idle drift. A still globe reads as a screenshot; a turning one invites a
+    // drag. It is slow enough (~1 rpm) not to fight a reader mid-sentence, and
+    // any interaction stops it immediately - auto-rotating under someone's
+    // pointer is the fastest way to make a 3D scene feel broken.
+    c.autoRotate = true;
+    c.autoRotateSpeed = 0.28;
     controls.current = c;
+
+    // Starfield. A fixed backdrop rather than an empty void: it gives the
+    // rotation something to move against, so the globe reads as turning in
+    // space instead of a flat disc being redrawn. Positions are deterministic
+    // (a hash, not Math.random) so the sky is identical on every load and a
+    // screenshot diff stays meaningful.
+    {
+      const count = 1400;
+      const positions = new Float32Array(count * 3);
+      const sizes = new Float32Array(count);
+      for (let i = 0; i < count; i += 1) {
+        // Cheap deterministic hash in [0,1).
+        const h = (n: number) => {
+          const x = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+          return x - Math.floor(x);
+        };
+        // Uniform on the sphere: acos(1-2u) avoids the polar clustering that
+        // sampling latitude directly would produce.
+        const theta = h(i) * Math.PI * 2;
+        const phi = Math.acos(1 - 2 * h(i + 0.5));
+        const radius = 40 + h(i + 0.25) * 24;
+        positions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
+        positions[i * 3 + 1] = radius * Math.cos(phi);
+        positions[i * 3 + 2] = radius * Math.sin(phi) * Math.sin(theta);
+        sizes[i] = 0.06 + h(i + 0.75) * 0.16;
+      }
+      const starGeometry = new THREE.BufferGeometry();
+      starGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      starGeometry.setAttribute("size", new THREE.BufferAttribute(sizes, 1));
+      const stars = new THREE.Points(
+        starGeometry,
+        new THREE.ShaderMaterial({
+          transparent: true,
+          depthWrite: false,
+          uniforms: { uScale: { value: window.innerHeight / 2 } },
+          vertexShader: `
+            attribute float size;
+            varying float vSize;
+            uniform float uScale;
+            void main() {
+              vSize = size;
+              vec4 mv = modelViewMatrix * vec4(position, 1.0);
+              gl_PointSize = size * (uScale / -mv.z) * 1.6;
+              gl_Position = projectionMatrix * mv;
+            }`,
+          fragmentShader: `
+            varying float vSize;
+            void main() {
+              float d = length(gl_PointCoord - vec2(0.5));
+              if (d > 0.5) discard;
+              gl_FragColor = vec4(0.72, 0.82, 0.95, smoothstep(0.5, 0.0, d) * (0.25 + vSize));
+            }`,
+        })
+      );
+      // Never occludes the globe, and is not worth depth-sorting against.
+      stars.renderOrder = -1;
+      s.add(stars);
+    }
 
     // Ocean. Slightly smaller than the line layers so coastlines never z-fight
     // with the surface they sit on.
@@ -161,6 +232,8 @@ export default function Globe({
     dataGroup.current = group;
     s.add(group);
 
+    const clock = new THREE.Clock();
+
     const raycaster = new THREE.Raycaster();
     raycaster.params.Points = { threshold: 0.02 };
     const pointer = new THREE.Vector2();
@@ -193,6 +266,8 @@ export default function Globe({
       lastMove = { x: event.clientX - rect.left, y: event.clientY - rect.top };
       pointerInside = true;
       const found = pick();
+      hovering.current = Boolean(found);
+      lastInteraction.current = clock.getElapsedTime();
       r.domElement.style.cursor = found ? "pointer" : "grab";
       setTip(found ? { ...found.screen, feature: found.feature } : null);
       handlers.current.onHover(found?.feature.id ?? null);
@@ -200,6 +275,7 @@ export default function Globe({
 
     const onPointerLeave = () => {
       pointerInside = false;
+      hovering.current = false;
       setTip(null);
       handlers.current.onHover(null);
     };
@@ -220,6 +296,12 @@ export default function Globe({
       handlers.current.onSelect(found?.feature.id ?? null);
     };
 
+    const noteInteraction = () => {
+      lastInteraction.current = clock.getElapsedTime();
+    };
+    c.addEventListener("start", noteInteraction);
+    c.addEventListener("change", noteInteraction);
+    r.domElement.addEventListener("wheel", noteInteraction, { passive: true });
     r.domElement.addEventListener("pointermove", onPointerMove);
     r.domElement.addEventListener("pointerleave", onPointerLeave);
     r.domElement.addEventListener("pointerdown", onPointerDown);
@@ -236,10 +318,22 @@ export default function Globe({
     observer.observe(mount);
 
     let frame = 0;
-    const clock = new THREE.Clock();
     const tick = () => {
       frame = requestAnimationFrame(tick);
       const elapsed = clock.getElapsedTime();
+
+      // Resume drifting only after the pointer has been still and away for a
+      // beat, and never while a fly-to is in flight or a marker is under the
+      // cursor - both are moments where the user is reading something specific.
+      const idleFor = elapsed - lastInteraction.current;
+      c.autoRotate = idleFor > IDLE_RESUME_SECONDS && !flight.current && !hovering.current;
+
+      // One uniform drives every marker's pulse.
+      const cloudNow = markerCloud.current;
+      if (cloudNow) {
+        const uniforms = (cloudNow.material as THREE.ShaderMaterial).uniforms;
+        if (uniforms?.uTime) uniforms.uTime.value = elapsed;
+      }
 
       // Camera flight to a selected feature: ease the position along a great
       // circle so the globe appears to turn rather than the camera to teleport.
@@ -270,6 +364,9 @@ export default function Globe({
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
+      c.removeEventListener("start", noteInteraction);
+      c.removeEventListener("change", noteInteraction);
+      r.domElement.removeEventListener("wheel", noteInteraction);
       r.domElement.removeEventListener("pointermove", onPointerMove);
       r.domElement.removeEventListener("pointerleave", onPointerLeave);
       r.domElement.removeEventListener("pointerdown", onPointerDown);
@@ -343,6 +440,7 @@ export default function Globe({
     const positions: number[] = [];
     const colors: number[] = [];
     const sizes: number[] = [];
+    const pulses: number[] = [];
     const outline: number[] = [];
     const outlineColors: number[] = [];
 
@@ -361,6 +459,11 @@ export default function Globe({
       // Gulf and the Southeast merged into a single blob and hid how many
       // separate warnings were in them.
       sizes.push(isHit ? 9 : feature.source_type === "alert" ? 5 : 3.4);
+      // Only the alerts a person would want to act on breathe. Pulsing all 500
+      // markers reads as noise and stops meaning anything; restricting it to
+      // Extreme and Severe makes the motion itself carry the signal.
+      const urgent = feature.severity === "Extreme" || feature.severity === "Severe";
+      pulses.push(isHit ? 1 : urgent ? 0.75 : 0);
 
       // The published warning footprint, where there is one.
       if (feature.geometry) {
@@ -395,6 +498,7 @@ export default function Globe({
       geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
       geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
       geometry.setAttribute("size", new THREE.Float32BufferAttribute(sizes, 1));
+      geometry.setAttribute("pulse", new THREE.Float32BufferAttribute(pulses, 1));
 
       // A shader rather than PointsMaterial so each marker can carry its own
       // size and still shrink with distance, and so the disc is drawn with a
@@ -402,15 +506,24 @@ export default function Globe({
       const material = new THREE.ShaderMaterial({
         transparent: true,
         depthWrite: false,
-        uniforms: { uScale: { value: window.innerHeight / 2 } },
+        uniforms: {
+          uScale: { value: window.innerHeight / 2 },
+          uTime: { value: 0 },
+        },
+        // The pulse runs in the vertex shader rather than as a per-frame JS
+        // traversal: at ~500 markers, touching each one from the animation loop
+        // every frame is work the GPU will do for free from a single uniform.
         vertexShader: `
           attribute float size;
+          attribute float pulse;
           varying vec3 vColor;
           uniform float uScale;
+          uniform float uTime;
           void main() {
             vColor = color;
+            float beat = 1.0 + sin(uTime * 2.1) * 0.22 * pulse;
             vec4 mv = modelViewMatrix * vec4(position, 1.0);
-            gl_PointSize = size * (uScale / -mv.z) * 0.012;
+            gl_PointSize = size * beat * (uScale / -mv.z) * 0.012;
             gl_Position = projectionMatrix * mv;
           }`,
         fragmentShader: `
@@ -552,6 +665,10 @@ export default function Globe({
           <span>
             {tip.feature.location}
             {tip.feature.severity ? ` · ${tip.feature.severity}` : ""}
+          </span>
+          <span className="tip-sentiment" data-sentiment={sentimentOf(tip.feature)}>
+            {SENTIMENT_STYLE[sentimentOf(tip.feature)].glyph}{" "}
+            {SENTIMENT_STYLE[sentimentOf(tip.feature)].label}
           </span>
         </div>
       )}

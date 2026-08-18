@@ -27,6 +27,7 @@ from functools import lru_cache
 from typing import Sequence
 
 import lakebase
+import weather_sentiment
 from weather_pipeline import (
     DEFAULT_DOCUMENTS_TABLE,
     DEFAULT_EMBEDDINGS_TABLE,
@@ -147,6 +148,7 @@ def search_weather(
     # thinned `rings` there is a shape mismatch waiting to break the caller.
     for row in rows:
         row["geometry"] = thin_geometry(row.get("geometry"))
+        weather_sentiment.annotate(row)
     return rows
 
 

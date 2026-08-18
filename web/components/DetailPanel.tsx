@@ -2,6 +2,7 @@
 
 import { colorOf } from "@/lib/severity";
 import { anchorLabel } from "@/lib/geo";
+import { SENTIMENT_STYLE, matchBand, matchPercent, sentimentOf } from "@/lib/sentiment";
 import type { Feature, SearchHit } from "@/lib/types";
 
 interface Props {
@@ -48,7 +49,8 @@ export default function DetailPanel({ feature, hit, loading, onClose }: Props) {
             {hit && (
               <div className="matched">
                 <div className="eyebrow" style={{ color: "var(--minor)", marginBottom: 6 }}>
-                  Matched passage · similarity {hit.similarity.toFixed(4)}
+                  Matched passage · {matchPercent(hit.similarity)}% match
+                  {" · "}{matchBand(hit.similarity)} · cosine {hit.similarity.toFixed(4)}
                 </div>
                 {hit.chunk_text}
               </div>
@@ -68,6 +70,16 @@ export default function DetailPanel({ feature, hit, loading, onClose }: Props) {
               <dt>Expires</dt>
               <dd style={{ color: expired ? "var(--severe)" : undefined }}>
                 {when(feature.expires_at)}
+              </dd>
+              <dt>Outlook</dt>
+              <dd>
+                <span className="tag-sentiment" data-sentiment={sentimentOf(feature)}>
+                  <i aria-hidden="true">{SENTIMENT_STYLE[sentimentOf(feature)].glyph}</i>
+                  {SENTIMENT_STYLE[sentimentOf(feature)].label}
+                </span>
+                <span style={{ color: "var(--faint)", marginLeft: 8, fontSize: 11 }}>
+                  {SENTIMENT_STYLE[sentimentOf(feature)].hint}
+                </span>
               </dd>
               <dt>Footprint</dt>
               <dd>{anchorLabel(feature)}</dd>

@@ -7,6 +7,13 @@ export type SourceType = "alert" | "forecast";
  */
 export type GeoSource = "polygon" | "zone" | "state" | "point";
 
+/**
+ * Whether the *weather* is good news, bad news, or neither — not the tone of
+ * the prose. Derived server-side from the NWS severity/event vocabulary for
+ * alerts and a weighted lexicon plus temperature for forecasts.
+ */
+export type Sentiment = "positive" | "negative" | "neutral";
+
 /** Only the outer rings survive the server's thinning; holes are dropped. */
 export interface Geometry {
   type: "MultiPolygon";
@@ -19,6 +26,7 @@ export interface Feature {
   latitude: number | null;
   longitude: number | null;
   geo_source: GeoSource | null;
+  sentiment: Sentiment | null;
   source_type: SourceType;
   event: string | null;
   headline: string | null;
