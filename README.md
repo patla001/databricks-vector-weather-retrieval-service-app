@@ -28,6 +28,64 @@ the sentiment split, and double as filters.*
 
 ---
 
+## Live app
+
+**https://weather-vector-app-2808874854650870.aws.databricksapps.com**
+
+Running on Databricks Apps, backed by the `weather-vector-db` Lakebase instance,
+refreshing itself every 30 minutes and re-harvesting the whole country daily at
+06:00 PT.
+
+**It is not public.** Databricks Apps sits behind an OAuth proxy, so an
+unauthenticated visitor is redirected to a Databricks sign-in page rather than
+the console — if you click the link and land on a login screen, the app is
+working, you just are not signed in to the workspace yet.
+
+| If you | Then |
+|---|---|
+| have access to the workspace | open the link and sign in; you land on the console |
+| do not | the [screenshots](#screenshots) below show it, and [running it end to end](#running-it-end-to-end) takes about five minutes against your own Lakebase |
+| have been granted access but see a login loop | you are signed in to a *different* Databricks account in that browser — use a private window |
+
+To grant someone access, the app owner runs:
+
+```bash
+databricks apps set-permissions weather-vector-app --json '{
+  "access_control_list": [
+    {"user_name": "them@example.com", "permission_level": "CAN_USE"}
+  ]
+}'
+```
+
+`CAN_USE` lets them open the console; `CAN_MANAGE` also allows deploy and delete,
+which a reviewer does not need.
+
+### Calling the API directly
+
+The same OAuth applies, so a bare `curl` gets the sign-in HTML rather than JSON.
+Send a workspace token:
+
+```bash
+URL=https://weather-vector-app-2808874854650870.aws.databricksapps.com
+TOKEN=$(databricks auth token | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+
+curl -s -H "Authorization: Bearer $TOKEN" "$URL/weather/stats"
+
+curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+     -X POST "$URL/weather/search" \
+     -d '{"query":"flash flood risk this weekend","top_k":5}'
+```
+
+That token is also what `test_deployment.py` uses, so the full suite can be run
+against production:
+
+```bash
+python test_deployment.py https://weather-vector-app-2808874854650870.aws.databricksapps.com
+```
+
+
+---
+
 ## In brief
 
 The four questions, answered directly. Every claim here is expanded further down.
