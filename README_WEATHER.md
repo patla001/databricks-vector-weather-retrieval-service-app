@@ -20,8 +20,11 @@ active US alert and forecast plotted on the globe](docs/screenshots/02-search.pn
 cosine similarity — each hit showing its match percentage, a strength band and
 whether the weather itself is positive, negative or neutral. On the globe, the
 columns rising out of the surface are those same hits, their height being the
-similarity; everything else is the live corpus, each alert drawn at its own
-geography rather than at the city that fetched it.*
+similarity; everything else is the live corpus — every active alert nationwide
+plus a narrative forecast for 173 cities across all 50 states, DC and Puerto
+Rico — each alert drawn at its own geography rather than at the city that
+fetched it. The legend counts (`NEGATIVE 327 · NEUTRAL 536 · POSITIVE 637`) are
+the sentiment split, and double as filters.*
 
 ---
 
@@ -420,13 +423,6 @@ behaviour bit the scheduled-job experiment.
 
 
 ### Screenshots
-
-**The corpus at rest** — no query yet. Every active alert nationwide plus a
-narrative forecast for 173 cities across all 50 states, DC and Puerto Rico.
-Colour is NWS severity; the blue dots are forecasts. The counts in the legend
-(`NEGATIVE 327 · NEUTRAL 536 · POSITIVE 637`) are the sentiment split.
-
-![The console with no query: the full corpus plotted nationwide](docs/screenshots/01-console.png)
 
 **A result opened.** The panel is the argument for two of the decisions on this
 page. `MATCHED PASSAGE · 72% MATCH · STRONG · COSINE 0.7181` shows the
