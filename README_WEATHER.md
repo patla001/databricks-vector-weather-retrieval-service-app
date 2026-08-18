@@ -14,7 +14,7 @@ helper, `execute_values` + `%s::vector` writes, HNSW cosine index, `<=>` retriev
 against a new unstructured source.
 
 ![The console: a semantic search for "dangerous heat and humidity", with every
-active US alert and forecast plotted on the globe](docs/screenshots/02-search.png)
+active US alert and forecast plotted on the globe](docs/screenshots/01-semantic-search.png)
 
 *One query, `"dangerous heat and humidity"`. The left rail ranks the corpus by
 cosine similarity — each hit showing its match percentage, a strength band and
@@ -431,14 +431,14 @@ number never hides the real one. `FOOTPRINT: Centroid of the NWS zones it
 covers` is the map refusing to overstate its precision — this alert shipped no
 polygon, and the panel says so rather than implying the dot is exact.
 
-![A search result opened, showing the matched passage, outlook and footprint provenance](docs/screenshots/03-detail.png)
+![A search result opened, showing the matched passage, outlook and footprint provenance](docs/screenshots/02-result-detail.png)
 
 **Sentiment as a filter.** Clicking `POSITIVE` isolates the benign weather — and
 the hazard markers that remain are the *current search hits*, which are never
 filtered out. Hiding a result the list beside it is still showing would break
 the link between the two halves of the page.
 
-![The positive sentiment filter applied, with search hits still visible](docs/screenshots/04-filter.png)
+![The positive sentiment filter applied, with search hits still visible](docs/screenshots/03-sentiment-filter.png)
 
 ### Two things the data forced
 
