@@ -41,11 +41,25 @@ unauthenticated visitor is redirected to a Databricks sign-in page rather than
 the console — if you click the link and land on a login screen, the app is
 working, you just are not signed in to the workspace yet.
 
+### No access? Here it is running
+
+Ten seconds of the deployed console, recorded against the live corpus — search,
+ranked results with match percentages and sentiment, a result opened, and the
+sentiment filter:
+
+![A recorded walkthrough of the console: searching, opening a result, and
+filtering by sentiment](docs/screenshots/walkthrough.gif)
+
 | If you | Then |
 |---|---|
 | have access to the workspace | open the link and sign in; you land on the console |
-| do not | the [screenshots](#screenshots) below show it, and [running it end to end](#running-it-end-to-end) takes about five minutes against your own Lakebase |
+| do not | the recording above and the [screenshots](#screenshots) below show it, and [running it end to end](#running-it-end-to-end) takes about five minutes against your own Lakebase |
 | have been granted access but see a login loop | you are signed in to a *different* Databricks account in that browser — use a private window |
+
+Access cannot be handed out by URL alone: Databricks Apps authenticates against
+the workspace, so a viewer needs an identity in the Databricks **account** before
+any app-level permission applies. The app already grants `CAN_USE` to
+`account users`; the gap for an outside reviewer is the account, not the app.
 
 To grant someone access, the app owner runs:
 
