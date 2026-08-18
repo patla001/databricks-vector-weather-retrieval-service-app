@@ -11,8 +11,10 @@ Connections reuse lakebase.py, which resolves LAKEBASE_URL from the environment
 when set and otherwise from the `database/lakebase-url` secret - so the same
 code runs locally off .env and on a cluster off the secret scope.
 
-Writes go through psycopg2 (execute_values, batched, with an explicit ::vector
-cast) rather than Spark's JDBC writer, which is not supported against Lakebase.
+Writes go through the DB-API driver directly (batched multi-row INSERTs with an
+explicit ::vector cast) rather than Spark's JDBC writer, which is not supported
+against Lakebase. execute_values comes from lakebase.py rather than psycopg2, so
+the same code runs on pg8000 in a serverless job - see that module for why.
 """
 
 from __future__ import annotations
@@ -23,9 +25,8 @@ import logging
 import os
 from typing import Callable, Sequence
 
-from psycopg2.extras import execute_values
-
 import lakebase
+from lakebase import execute_values
 
 logger = logging.getLogger(__name__)
 

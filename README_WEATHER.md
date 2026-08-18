@@ -185,6 +185,7 @@ request and the grid lookup. An unknown city returns a 400 listing every support
 | `scripts/benchmark_hnsw.py` | HNSW vs. sequential-scan latency, with a synthetic-scale mode |
 | `weather_refresh.py` | One refresh cycle (harvest → upsert → purge → embed), shared by the app and the CLI |
 | `weather_scheduler.py` | In-app timer that runs a cycle every 30 min so the corpus stays current |
+| `resources/weather_daily_ingest_job.json` | The scheduled Databricks Job definition — daily harvest → upsert → purge → embed |
 | `notebooks/scheduled_weather_refresh.py` | The same cycle as a CLI, for manual or external scheduling |
 | `test_deployment.py` | End-to-end test; verifies every write through the API *and* in Postgres |
 | `setup_secrets.py` | One-time write of the Lakebase DSN to `database/weather-lakebase-url` |
@@ -346,6 +347,43 @@ the browser never loads a TopoJSON decoder.
 > "Summary unavailable" and the ranked results are unaffected — the summary is
 > an extra that must never take retrieval down. `app.yaml` carries the commented
 > two-line opt-in and the `databricks secrets` command that enables it.
+
+---
+
+## Scheduling
+
+Two schedulers run, and they do different jobs:
+
+| | Cadence | Survives app stop | Role |
+|---|---|---|---|
+| `weather_scheduler.py` (in-app timer) | 30 min | ✗ | Alerts expire within hours; this keeps them fresh |
+| `weather-daily-ingest` (Databricks Job) | daily 06:00 PT | ✓ | Guarantees the corpus updates even with the app down |
+
+Every step is idempotent — documents upsert on their natural id, chunks collide
+on a derived primary key — so overlapping runs waste a little work and cannot
+corrupt anything. `WEATHER_REFRESH_MINUTES=0` leaves only the Job.
+
+### The one flag the Job depends on
+
+`--db-driver pg8000`. Without it the task dies as `Fatal error: The Python
+kernel is unresponsive` with its logs discarded.
+
+I originally recorded the cause as "requests + psycopg2 + fastembed together
+segfault a serverless kernel." **That was wrong.** Isolating it properly:
+the full refresh with `--skip-embed` (no fastembed) still died; a bare
+`import psycopg2` + `connect()` still died; the same script on `pg8000` worked,
+as did the full harvest *and* embed.
+
+It is **psycopg2 alone, on connect rather than import**. `psycopg2-binary`
+bundles its own `libssl`/`libcrypto`, a serverless kernel has already loaded
+OpenSSL via grpc and pyarrow, and two builds in one process abort on the first
+TLS handshake. Firing on connect is why every import-only probe looked healthy
+and why the first diagnosis blamed the wrong library.
+
+`pg8000` is pure Python and does TLS through Python's own `ssl` module, so there
+is only one OpenSSL. `lakebase.py` now speaks both drivers behind one interface,
+selected by `WEATHER_DB_DRIVER`; the app keeps psycopg2, the Job uses pg8000,
+and the 45-check suite passes on both.
 
 ---
 

@@ -263,35 +263,64 @@ cycle wastes work but cannot corrupt anything. A lock skips a tick rather than
 stacking cycles, and the thread swallows its exceptions so a failed refresh
 degrades freshness without taking the API down.
 
-### Why not a Databricks Job
+---
 
-The obvious design is a scheduled Job, and `notebooks/scheduled_weather_refresh.py`
-still supports it (`--skip-embed` splits the stages; `--app-url` drives the app's
-endpoints instead of the database). It is **not** what runs here, for two reasons
-found by testing rather than assumption:
+## Step 7 — The daily ingest Job
 
-1. **This workspace is serverless-only** — creating a job with a classic cluster
-   fails with `Only serverless compute is supported in the workspace`.
-2. **A serverless task that loads `requests` + `psycopg2` + `fastembed` into one
-   kernel segfaults it.** The failure is `Fatal error: The Python kernel is
-   unresponsive` with the run's logs discarded, which makes it look like a
-   hang rather than a crash. Isolated probes established that each *pair* is
-   fine — `fastembed` alone, and `psycopg2` + `requests` + `databricks-sdk`
-   together, both ran clean — and that the harvest crashed before writing a
-   single row.
+A scheduled Databricks Job **does** work, and one is running: `weather-daily-ingest`,
+06:00 America/Los_Angeles daily. It is the same cycle the in-app timer runs, but
+it survives the app being stopped.
 
-Driving the app's HTTP endpoints from a job avoids the crash but hits a second
-wall: a job's SDK credential is `auth_type: runtime`, an internal token the
-Apps OAuth proxy rejects. It answers with the **Databricks Sign-In page as
-HTTP 200 `text/html`**, so `raise_for_status()` passes and the failure only
-surfaces as a confusing `JSONDecodeError`. `refresh_via_app()` now detects a
-non-JSON content-type and says so plainly. Making that path work needs a
-service principal with an OAuth M2M secret granted `CAN_USE` on the app —
-worth doing if you want the refresh outside the app, but it is strictly more
-moving parts than a timer in a process that already works.
+```bash
+databricks jobs create --json @resources/weather_daily_ingest_job.json
+databricks jobs run-now <job_id>          # verify before trusting the schedule
+```
 
-The app container runs `psycopg2` + `fastembed` together happily — it must, to
-serve `/weather/search` — which is exactly why the scheduler lives there.
+**The whole thing hinges on one flag: `--db-driver pg8000`.**
+
+For a long time every job attempt died with `Fatal error: The Python kernel is
+unresponsive`, logs discarded. I originally recorded that as "requests +
+psycopg2 + fastembed together segfault a serverless kernel." **That was wrong,
+and it sent me down a dead end.** Isolating it properly:
+
+| Probe | Result |
+|---|---|
+| The full refresh with `--skip-embed` (no fastembed at all) | kernel dead |
+| A bare script: `import psycopg2` then `connect()` | kernel dead |
+| The same script on `pg8000` | **worked** |
+| Full harvest + embed on `pg8000` (fastembed included) | **worked** |
+
+It is **psycopg2 alone, and on connect rather than import**. `psycopg2-binary`
+bundles its own `libssl`/`libcrypto`; a serverless kernel has already loaded
+OpenSSL through grpc and pyarrow, and two builds in one process abort on the
+first TLS handshake. Because it fires on connect, every import-only probe looked
+healthy — which is exactly why the original diagnosis blamed fastembed.
+
+`pg8000` is pure Python and does TLS through Python's own `ssl` module, so there
+is only ever one OpenSSL. `lakebase.py` speaks both drivers behind one interface
+(`WEATHER_DB_DRIVER`), and the full 45-check suite passes on each.
+
+> The job's environment deliberately does **not** list `psycopg2-binary`. If it
+> did, `_pick_driver()` would select it and the task would die again.
+
+### Both schedulers run, on purpose
+
+| | Cadence | Survives app stop | Role |
+|---|---|---|---|
+| In-app timer (`weather_scheduler.py`) | 30 min | ✗ | Keeps alerts fresh — they expire within hours |
+| `weather-daily-ingest` Job | daily 06:00 PT | ✓ | Guarantees the corpus updates even if the app is down |
+
+Every step is idempotent — documents upsert on their natural id, chunks collide
+on a derived primary key — so the two overlapping cost a little duplicated work
+and cannot corrupt anything. Set `WEATHER_REFRESH_MINUTES=0` to leave only the
+Job.
+
+The other job mode, `--app-url`, drives the app's HTTP endpoints instead of the
+database. It is **not** used: a job's SDK credential is `auth_type: runtime`,
+which the Apps OAuth proxy answers with its sign-in page as HTTP 200
+`text/html`, so `raise_for_status()` passes and the failure surfaces as a
+confusing `JSONDecodeError`. `refresh_via_app()` detects the non-JSON
+content-type and says so. Direct mode needs no app and no OAuth round trip.
 
 ---
 
@@ -325,4 +354,5 @@ Deleting the instance is what stops the charge; deleting the app alone does not.
 | Summaries stop partway through the day | The daily ceiling was reached. `GET /weather/stats` -> `summary.throttled_today`. Raise `WEATHER_SUMMARY_DAILY_LIMIT` or wait for 00:00 UTC; search is unaffected |
 | `query is N characters; the maximum is 500` | Working as intended — an unbounded query is billed as summary input tokens. See "Cost guardrails" in README_WEATHER.md |
 | Console shows "the API returned a page instead of JSON" | The Databricks OAuth session expired. Reload to sign in again |
+| Job dies with `Fatal error: The Python kernel is unresponsive` | `psycopg2-binary` reached a serverless task. Pass `--db-driver pg8000` and keep psycopg2 out of the job's `dependencies` — its bundled OpenSSL collides with the kernel's on the first TLS handshake |
 | Deploy succeeds but the app won't start | Check `app.yaml`'s port handling — `DATABRICKS_APP_PORT` must win, and it does in `app.py`'s `__main__` block |

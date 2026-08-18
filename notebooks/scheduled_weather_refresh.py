@@ -71,10 +71,21 @@ for path in (_ROOT, os.path.join(_ROOT, "notebooks")):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-# Must be set BEFORE importing lakebase: that module reads the scope and key
-# into module-level constants at import time.
+# Must be set BEFORE importing lakebase: that module reads the scope, key and
+# driver into module-level constants at import time.
 os.environ.setdefault("LAKEBASE_SECRET_SCOPE", "database")
 os.environ.setdefault("LAKEBASE_SECRET_KEY", "weather-lakebase-url")
+
+# --db-driver, read before argparse for the same reason as --repo-root.
+#
+# A Databricks serverless task must use pg8000. psycopg2-binary bundles its own
+# libssl/libcrypto and the serverless kernel has already loaded OpenSSL through
+# grpc and pyarrow; two builds in one process abort on the first TLS handshake,
+# and the task dies as "Fatal error: The Python kernel is unresponsive" with its
+# buffered stdout lost - which reads like a hang rather than a crash. It fires on
+# connect, not import, so a probe that only imports psycopg2 looks healthy.
+if "--db-driver" in sys.argv:
+    os.environ["WEATHER_DB_DRIVER"] = sys.argv[sys.argv.index("--db-driver") + 1]
 # fastembed downloads its ONNX export on first use; job containers only
 # guarantee /tmp is writable.
 os.environ.setdefault("FASTEMBED_CACHE_PATH", "/tmp/.cache/fastembed")
@@ -194,6 +205,11 @@ def main(argv: list[str] | None = None) -> int:
              "HTTP client in different processes - loading requests, psycopg2 "
              "and fastembed into one serverless kernel crashes it, while either "
              "pair on its own is fine.")
+    parser.add_argument(
+        "--db-driver", default=None, choices=["psycopg2", "pg8000"],
+        help="Postgres driver. Use pg8000 in a Databricks serverless job; "
+             "psycopg2 segfaults that kernel on connect. Read before argparse; "
+             "listed here so the parser accepts it.")
     parser.add_argument("--repo-root", default=None,
                         help="Repo root, for runners where __file__ is undefined "
                              "(Databricks serverless). Read before argparse; listed "
@@ -215,7 +231,10 @@ def main(argv: list[str] | None = None) -> int:
     # -- direct mode: this process talks to Lakebase itself ------------------
     import weather_refresh
 
+    import lakebase
+
     print("mode:      direct (this process connects to Lakebase)")
+    print(f"driver:    {lakebase.DRIVER}")
     print(f"locations: {locations}")
     print(f"sources:   {sources}  limit={args.limit}")
     print(f"secret:    {os.environ['LAKEBASE_SECRET_SCOPE']}/"

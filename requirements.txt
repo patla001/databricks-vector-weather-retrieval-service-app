@@ -14,3 +14,8 @@ fastembed>=0.4.0
 # The endpoint degrades gracefully to search-only when this or ANTHROPIC_API_KEY
 # is missing, so it is safe to drop from a deployment that doesn't want it.
 anthropic>=0.40.0
+# Pure-Python Postgres driver. The app uses psycopg2; this exists for Databricks
+# serverless job tasks, where psycopg2-binary's bundled OpenSSL collides with the
+# kernel's (loaded via grpc/pyarrow) and aborts the process on the first TLS
+# handshake. Selected with WEATHER_DB_DRIVER=pg8000.
+pg8000>=1.31.0
