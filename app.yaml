@@ -90,11 +90,11 @@ env:
   #        "secret": {"scope": "database", "key": "anthropic-api-key", "permission": "READ"}}
   #     ]}'
   #
-  # Kept commented rather than pointing at a resource that may not exist: an
-  # unresolvable valueFrom is a deploy-time problem, and the summary is an
-  # extra that must never be able to take the API down.
-  # - name: ANTHROPIC_API_KEY
-  #   valueFrom: anthropic-api-key
+  # Enabled. If the resource is ever detached this resolves to an empty string,
+  # weather_search raises "ANTHROPIC_API_KEY is not set", and the console shows
+  # "Summary unavailable" - search keeps working either way.
+  - name: ANTHROPIC_API_KEY
+    valueFrom: anthropic-api-key
 
   # --- Summary guardrails -----------------------------------------------------
   # The summary is the only per-request cost in this app. These bound it; each
