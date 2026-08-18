@@ -1,8 +1,8 @@
 {
   "name": "weather-daily-ingest",
-  "description": "Daily NWS harvest -> Lakebase upsert -> purge expired -> embed pending.",
+  "description": "Daily nationwide NWS harvest -> Lakebase upsert -> purge expired -> embed pending. Alerts cover every state; forecasts cover the built-in city list.",
   "max_concurrent_runs": 1,
-  "timeout_seconds": 3600,
+  "timeout_seconds": 7200,
   "schedule": {
     "quartz_cron_expression": "0 0 6 * * ?",
     "timezone_id": "America/Los_Angeles",
@@ -11,21 +11,28 @@
   "tasks": [
     {
       "task_key": "ingest",
-      "description": "One full refresh cycle. Every step is idempotent, so a duplicate or overlapping run wastes work but cannot corrupt anything.",
+      "description": "One full refresh cycle: every active US alert (national scope, one request) plus a narrative forecast for all 173 built-in cities across the 50 states, DC and PR. Every step is idempotent, so a duplicate or overlapping run wastes work but cannot corrupt anything.",
       "spark_python_task": {
         "python_file": "/Workspace/Users/epatlan1742@sdsu.edu/weather-vector-app/notebooks/scheduled_weather_refresh.py",
         "parameters": [
-          "--db-driver", "pg8000",
-          "--repo-root", "/Workspace/Users/epatlan1742@sdsu.edu/weather-vector-app",
-          "--locations", "Chicago, IL|Austin, TX|Houston, TX|Miami, FL|Denver, CO",
-          "--limit", "50",
-          "--purge-expired-days", "7"
+          "--db-driver",
+          "pg8000",
+          "--repo-root",
+          "/Workspace/Users/epatlan1742@sdsu.edu/weather-vector-app",
+          "--alert-scope",
+          "national",
+          "--locations",
+          "ALL",
+          "--limit",
+          "50",
+          "--purge-expired-days",
+          "7"
         ]
       },
       "environment_key": "default",
       "max_retries": 1,
       "min_retry_interval_millis": 60000,
-      "timeout_seconds": 3000
+      "timeout_seconds": 5400
     }
   ],
   "environments": [
@@ -33,7 +40,12 @@
       "environment_key": "default",
       "spec": {
         "client": "3",
-        "dependencies": ["pg8000", "requests", "fastembed", "python-dotenv"]
+        "dependencies": [
+          "pg8000",
+          "requests",
+          "fastembed",
+          "python-dotenv"
+        ]
       }
     }
   ]

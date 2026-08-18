@@ -89,8 +89,11 @@ def chunk_id(document_id: str, index: int) -> str:
 # Stage 1 - documents
 # ---------------------------------------------------------------------------
 
+# payload MUST stay last: the execute_values template below casts only the final
+# placeholder to jsonb.
 _DOCUMENT_COLUMNS = (
-    "id", "location", "latitude", "longitude", "source_type", "event", "headline",
+    "id", "location", "latitude", "longitude", "geo_source",
+    "source_type", "event", "headline",
     "narrative_text", "text_hash", "severity", "area_desc",
     "issued_at", "effective_at", "expires_at", "payload",
 )
@@ -398,8 +401,8 @@ def map_features(
     """
     rows = lakebase.run_query(
         f"""
-        SELECT id, location, latitude, longitude, source_type, event, headline,
-               severity, area_desc, issued_at, expires_at,
+        SELECT id, location, latitude, longitude, geo_source, source_type,
+               event, headline, severity, area_desc, issued_at, expires_at,
                payload -> 'geometry' AS geometry
         FROM {documents_table}
         WHERE (%(source_type)s::text IS NULL OR source_type = %(source_type)s)
@@ -434,9 +437,9 @@ def get_document(doc_id: str, documents_table: str = DEFAULT_DOCUMENTS_TABLE) ->
     """One document in full, including the narrative the map view omits."""
     rows = lakebase.run_query(
         f"""
-        SELECT id, location, latitude, longitude, source_type, event, headline,
-               narrative_text, severity, area_desc, issued_at, effective_at,
-               expires_at, synced_at, payload -> 'geometry' AS geometry
+        SELECT id, location, latitude, longitude, geo_source, source_type,
+               event, headline, narrative_text, severity, area_desc, issued_at,
+               effective_at, expires_at, synced_at, payload -> 'geometry' AS geometry
         FROM {documents_table}
         WHERE id = %(id)s
         """,

@@ -108,6 +108,7 @@ def search_weather(
                d.location,
                d.latitude,
                d.longitude,
+               d.geo_source,
                d.source_type,
                d.event,
                d.headline,

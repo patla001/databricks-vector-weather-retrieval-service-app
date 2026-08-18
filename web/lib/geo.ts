@@ -48,6 +48,28 @@ export function polygonCentroid(geometry: Geometry | null): { lon: number; lat: 
 /** True when the anchor came from a real NWS polygon rather than the city. */
 export const hasRealFootprint = (feature: Feature) => Boolean(feature.geometry?.rings?.length);
 
+/** Plain-English provenance for a marker's position. */
+export function anchorLabel(feature: Feature): string {
+  if (hasRealFootprint(feature)) {
+    const points = feature.geometry!.rings.reduce((n, r) => n + r.length, 0);
+    return `NWS warning polygon · ${points} points`;
+  }
+  switch (feature.geo_source) {
+    case "polygon":
+      return "NWS warning polygon";
+    case "zone":
+      return "Centroid of the NWS zones it covers";
+    case "state":
+      return "State centroid — zone geometry unavailable";
+    case "point":
+      return feature.source_type === "forecast"
+        ? "NWS forecast grid point"
+        : "Requesting city — no zone geometry";
+    default:
+      return "Unknown";
+  }
+}
+
 export interface GeoLines {
   land: [number, number][][];
   states: [number, number][][];

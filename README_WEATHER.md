@@ -19,17 +19,20 @@ against a new unstructured source.
 
 | | |
 |---|---|
-| Documents in `weather_documents` | **122** (52 alerts, 70 forecast periods) |
-| Chunks in `weather_embeddings` | **184** |
+| Documents in `weather_documents` | **3147** (519 alerts, 2628 forecast periods) |
+| Chunks in `weather_embeddings` | **3608** |
 | Unembedded backlog | **0** |
 | Orphan embeddings | **0** |
 | Duplicate `(document_id, chunk_index)` | **0** |
 | Embedding model | `sentence-transformers/all-MiniLM-L6-v2`, **384 dims** |
 | Distinct models in the table | **1** |
 | Index | `hnsw (embedding vector_cosine_ops)` |
-| End-to-end test | **28 passed, 0 failed** (local and against the deployed app) |
+| End-to-end test | **50 passed, 0 failed** (local and against the deployed app) |
 | Deployed | `weather-vector-app` on Databricks Apps, backed by the `weather-vector-db` Lakebase instance |
-| Locations | Chicago IL, Austin TX, Houston TX, Miami FL, Denver CO |
+| Alert coverage | **Nationwide** — one `/alerts/active` request, every state and territory |
+| Forecast coverage | **173 cities** across all 50 states, DC and Puerto Rico |
+| Distinct map positions | **138** for 173 active alerts (was 5 for the whole corpus) |
+| Daily Job | `weather-daily-ingest`, 06:00 PT — full sweep in **95s**, 0 errors, 0 pending |
 
 ### Search quality
 
@@ -176,20 +179,22 @@ request and the grid lookup. An unknown city returns a 400 listing every support
 
 | Path | What it is |
 |---|---|
-| `weather_client.py` | NWS API client — location resolution, alerts + forecasts, normalization |
+| `weather_client.py` | NWS API client — 173-city location table, nationwide/state/point alert scopes, normalization |
+| `weather_zones.py` | Three-tier geographic anchoring and the zone-centroid cache that makes tier two affordable |
 | `weather_pipeline.py` | Chunking, embedding, and `execute_values` writes; the anti-join that finds new work |
 | `weather_search.py` | Query-side pgvector search, the shared embedder, optional RAG summary |
 | `app.py` | Flask: `/healthz`, `/weather/sync`, `/weather/search` (POST + GET), `/weather/stats` |
 | `lakebase.py` | Connection helper, copied unchanged from the day-2 project |
 | `notebooks/ingest_weather_embeddings.py` | Batch embed job with a dimension preflight |
 | `scripts/benchmark_hnsw.py` | HNSW vs. sequential-scan latency, with a synthetic-scale mode |
+| `scripts/backfill_anchors.py` | One-off re-anchoring of alerts harvested before `geo_source` existed |
 | `weather_refresh.py` | One refresh cycle (harvest → upsert → purge → embed), shared by the app and the CLI |
 | `weather_scheduler.py` | In-app timer that runs a cycle every 30 min so the corpus stays current |
 | `resources/weather_daily_ingest_job.json` | The scheduled Databricks Job definition — daily harvest → upsert → purge → embed |
 | `notebooks/scheduled_weather_refresh.py` | The same cycle as a CLI, for manual or external scheduling |
 | `test_deployment.py` | End-to-end test; verifies every write through the API *and* in Postgres |
 | `setup_secrets.py` | One-time write of the Lakebase DSN to `database/weather-lakebase-url` |
-| `sql/00`–`sql/03` | Role grant, both table DDLs, verification queries |
+| `sql/00`–`sql/04` | Role grant, table DDLs, verification queries, zone-centroid cache |
 | `web/` | Next.js + three.js console source; `npm run build` static-exports it into `static/` |
 | `static/` | The **built** console, committed so the app deploys as one artifact |
 | `DEPLOY.md` | Databricks Apps runbook — instance, secret, schema, deploy, teardown |
@@ -306,7 +311,7 @@ behaviour bit the scheduled-job experiment.
 
 | | |
 |---|---|
-| **Globe** | Documents plotted on a 3D Earth. Where NWS published a warning polygon, the real footprint is drawn; the rest fall back to the city point |
+| **Globe** | Documents plotted on a 3D Earth at their own geography — the published warning polygon where there is one, the centroid of the alert's NWS zones otherwise |
 | **Relevance as altitude** | Each search hit raises a column whose height is its cosine similarity and whose colour is its NWS severity |
 | **Ranked list** | Rank, similarity to 4dp, severity bar, location, and the matched chunk |
 | **Answer card** | The RAG summary, above the evidence it was drawn from |
@@ -315,13 +320,21 @@ behaviour bit the scheduled-job experiment.
 
 ### Two things the data forced
 
-**Documents carry the coordinate of the city they were fetched for, not the area
-they cover.** All 450+ rows share five coordinates. So the globe prefers a
-polygon's centroid over the stored latitude/longitude — a warning fetched for
-"Chicago, IL" routinely covers southern Illinois — and fans hits that still
-share a point around it, so eight Denver results read as eight bars rather than
-one blob. Roughly a quarter of alerts are zone-based with no polygon; the detail
-panel says so rather than implying a precision the data does not have.
+**Four active alerts in five carry no polygon.** On a 189-alert nationwide
+sample only 38 had a `geometry`; the rest are issued against *zones* and
+reference them by URL. The first build gave those alerts the coordinates of
+whichever city requested them, so the entire corpus collapsed onto five dots and
+a statewide Illinois advisory was drawn on top of Chicago.
+
+The fix is a three-tier anchor, recorded per document in `geo_source` so the UI
+never has to guess: the alert's own polygon centroid, else the centroid of its
+`affectedZones`, else its state. Tier two is the one that needed care — a zone
+polygon is a separate ~26 KB request and there are ~3600 of them — but zones are
+*static geography*, so `weather_zones` caches two floats per zone and a cold
+cache is a one-time cost. On a live 201-alert harvest that yields 161 distinct
+positions instead of 1 (162 zone-anchored, 38 polygon, 1 state, 0 unplottable).
+The detail panel names the tier rather than implying a precision the data does
+not have.
 
 **Vertical columns are invisible from directly overhead.** The camera opens
 south of the continental US and stays oblique when it flies to a selection,
@@ -356,8 +369,8 @@ Two schedulers run, and they do different jobs:
 
 | | Cadence | Survives app stop | Role |
 |---|---|---|---|
-| `weather_scheduler.py` (in-app timer) | 30 min | ✗ | Alerts expire within hours; this keeps them fresh |
-| `weather-daily-ingest` (Databricks Job) | daily 06:00 PT | ✓ | Guarantees the corpus updates even with the app down |
+| `weather_scheduler.py` (in-app timer) | 30 min | ✗ | Alerts expire within hours; this keeps them fresh. Five forecast cities, but alerts nationwide — one request either way |
+| `weather-daily-ingest` (Databricks Job) | daily 06:00 PT | ✓ | The full sweep: nationwide alerts plus a forecast for all 173 cities. 231s, 2624 documents, 0 errors on the verifying run |
 
 Every step is idempotent — documents upsert on their natural id, chunks collide
 on a derived primary key — so overlapping runs waste a little work and cannot
@@ -542,31 +555,32 @@ the results.
 
 ## Limitations and what I'd do next
 
-- **The city table caps coverage at 40 cities.** Raw `"lat,lon"` works for anywhere in NWS
-  coverage, but "Fargo, ND" doesn't resolve. A geocoder is the fix; I skipped it to avoid a
-  third-party dependency with its own rate limit in the request path.
-- **Staleness is handled, but by a timer inside the app rather than a Databricks Job.**
-  `weather_scheduler.py` re-harvests every 30 minutes and purges alerts that expired more
-  than 7 days ago (the FK cascade takes their vectors with them). A scheduled Job would be
-  the more conventional home for this; it isn't used because the workspace is serverless-only
-  and a serverless task loading `requests` + `psycopg2` + `fastembed` together segfaults its
-  kernel — see DEPLOY.md for the evidence and the two alternatives. The in-app timer has a
-  real limitation: if the app is stopped, the refresh stops with it.
+- **The city table covers 173 cities, not every place.** All 50 states, DC and Puerto Rico
+  are represented, and every coordinate was verified against `api.weather.gov/points` — the
+  API reports which state a coordinate falls in, so a wrong entry cannot pass. But it is
+  still a fixed list: "Ames, IA" does not resolve, and raw `"lat,lon"` is the workaround.
+  A geocoder is the real fix; I skipped it to avoid a third-party dependency with its own
+  rate limit in the request path. Note this caps the *forecast* layer only — alerts are
+  harvested nationally and do not depend on the list at all.
 - **Chunking is character-based, not token-aware.** Cheap and close enough at 800 characters,
   but a token-aware splitter would pack chunks more evenly against the model's 256-token window.
 - **No reranker.** Cosine over MiniLM is a single-stage retriever. The similarity scores
   cluster around 0.5 even for good hits, which is normal for this model but means the scores
   are better for ranking than for thresholding — I would not build an "is this relevant"
   cutoff on the raw number without calibrating it first.
-- **Alerts are attributed to the requesting location, not their true area.** A statewide
-  `?area=IL` fetch tags every alert with "Chicago, IL" even when it covers southern Illinois —
-  which is why a Chicago flood query returns alerts for Crawford and Lawrence counties. The
-  `area_desc` column carries the real coverage; filtering on the alert's `affectedZones`
-  against the location's forecast zone would fix the attribution.
+- **A zone-anchored alert is a centroid, not a footprint.** Tier two samples 3 of an
+  alert's `affectedZones` (enough for a marker; sampling all of them would have meant 1022
+  zone lookups instead of 253 for no visible gain) and averages their centres. For an alert
+  spanning a whole state that point is honest but coarse — `geo_source` says `zone`, and
+  `area_desc` carries the real coverage. Drawing the union of the zone polygons would be
+  exact, at roughly 26 KB of geometry per zone.
+- **Marine alerts can be unplottable.** Offshore zones are not states, so an alert whose
+  zone lookup fails has no third tier to fall back on. Its coordinates stay NULL and it is
+  searchable but absent from the globe — deliberately, because inventing a landlocked
+  position for an offshore warning would be worse than omitting it.
 - **No auth on `/weather/sync`.** It's a write endpoint that triggers outbound API calls.
   Behind Databricks Apps it inherits workspace SSO, but standalone it should require something.
-- **Verification ran against Postgres 16 + pgvector 0.8.6 in Docker**, not the class Lakebase
-  instance, which was no longer reachable (`massive-sync-db.database.cloud.databricks.com` does
-  not resolve). Everything exercised is standard Postgres and pgvector — the DDL, the `<=>`
-  operator, `execute_values` with `%s::vector`, HNSW — so it should transfer unchanged; only
-  `LAKEBASE_URL` differs. The `sslmode=require` path is the one thing not exercised locally.
+- **The HNSW benchmark is honest about small corpora.** `scripts/benchmark_hnsw.py` toggles
+  the planner rather than dropping the index, and reports when the planner ignores HNSW
+  because a sequential scan is genuinely cheaper. The nationwide sweep pushes the corpus past
+  3000 documents, which is where the index starts to matter.

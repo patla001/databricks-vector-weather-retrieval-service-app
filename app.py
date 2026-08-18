@@ -23,7 +23,10 @@ load_dotenv()
 
 import lakebase  # noqa: E402
 import weather_pipeline  # noqa: E402
+import weather_zones  # noqa: E402
 from weather_client import (  # noqa: E402
+    DEFAULT_ALERT_SCOPE,
+    VALID_ALERT_SCOPES,
     VALID_SOURCES,
     LocationError,
     WeatherClient,
@@ -57,7 +60,10 @@ DEFAULT_LOCATIONS = [
 # (it truncates at 512 tokens), so the cap costs no retrieval quality.
 MAX_QUERY_CHARS = 500
 
-MAX_LOCATIONS_PER_SYNC = 25
+# Raised from 25 once the built-in table grew to cover every state: a full
+# nationwide forecast sweep lists ~173 cities, and refusing it would make the
+# app unable to run its own daily job.
+MAX_LOCATIONS_PER_SYNC = int(os.environ.get("WEATHER_MAX_LOCATIONS", "200"))
 MAX_SYNC_LIMIT = 500
 
 
@@ -76,6 +82,7 @@ def ensure_weather_documents_table():
             location       TEXT NOT NULL,
             latitude       DOUBLE PRECISION,
             longitude      DOUBLE PRECISION,
+            geo_source     TEXT,
             source_type    TEXT NOT NULL CHECK (source_type IN ('alert', 'forecast')),
             event          TEXT,
             headline       TEXT,
@@ -91,11 +98,17 @@ def ensure_weather_documents_table():
         )
         """
     )
+    # Added after the table shipped, so a deploy onto an existing database needs
+    # the ALTER as well as the CREATE. IF NOT EXISTS makes both paths idempotent.
+    lakebase.run_write(
+        f"ALTER TABLE {DOCUMENTS_TABLE} ADD COLUMN IF NOT EXISTS geo_source TEXT"
+    )
     for column in ("location", "source_type"):
         lakebase.run_write(
             f"CREATE INDEX IF NOT EXISTS idx_{DOCUMENTS_TABLE}_{column} "
             f"ON {DOCUMENTS_TABLE} ({column})"
         )
+    weather_zones.ensure_zones_table()
 
 
 def _embeddings_table_exists() -> bool:
@@ -231,6 +244,12 @@ def sync_weather():
         return _bad_request('"limit" must be an integer.')
     limit = max(1, min(limit, MAX_SYNC_LIMIT))
 
+    alert_scope = body.get("alert_scope") or DEFAULT_ALERT_SCOPE
+    if alert_scope not in VALID_ALERT_SCOPES:
+        return _bad_request(
+            f'Invalid alert_scope {alert_scope!r}. Valid values are {list(VALID_ALERT_SCOPES)}.'
+        )
+
     sources = body.get("sources") or list(VALID_SOURCES)
     if not isinstance(sources, list):
         return _bad_request('"sources" must be a list.')
@@ -251,8 +270,17 @@ def sync_weather():
     ensure_weather_documents_table()
 
     client = WeatherClient()
+    # Zone centroids are what let a zone-based alert be plotted where it applies
+    # rather than on whichever city asked for it. The cache is shared across the
+    # whole sync, so a zone looked up for one alert is free for the next.
+    zone_resolver = weather_zones.ZoneCentroids(client, log=logger.info)
     documents, errors = client.fetch_documents(
-        locations, limit=limit, sources=sources, log=logger.info
+        locations,
+        limit=limit,
+        sources=sources,
+        alert_scope=alert_scope,
+        zone_resolver=zone_resolver,
+        log=logger.info,
     )
     result = weather_pipeline.upsert_documents(documents)
 
@@ -260,10 +288,18 @@ def sync_weather():
     for doc in documents:
         by_source[doc["source_type"]] = by_source.get(doc["source_type"], 0) + 1
 
+    by_geo: dict[str, int] = {}
+    for doc in documents:
+        key = doc.get("geo_source") or "none"
+        by_geo[key] = by_geo.get(key, 0) + 1
+
     payload = {
         "synced": result["written"],
         "locations": locations,
+        "alert_scope": alert_scope,
         "by_source": by_source,
+        "by_geo_source": by_geo,
+        "zones": zone_resolver.stats(),
         "embeddings_invalidated": result["reembed"],
     }
     if errors:

@@ -1,5 +1,12 @@
 export type SourceType = "alert" | "forecast";
 
+/**
+ * How a document's coordinates were decided, best first. Most active alerts
+ * carry no polygon, so without this the map cannot say whether a marker is the
+ * hazard's real footprint or an approximation.
+ */
+export type GeoSource = "polygon" | "zone" | "state" | "point";
+
 /** Only the outer rings survive the server's thinning; holes are dropped. */
 export interface Geometry {
   type: "MultiPolygon";
@@ -11,6 +18,7 @@ export interface Feature {
   location: string;
   latitude: number | null;
   longitude: number | null;
+  geo_source: GeoSource | null;
   source_type: SourceType;
   event: string | null;
   headline: string | null;

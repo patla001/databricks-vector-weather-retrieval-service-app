@@ -356,7 +356,11 @@ export default function Globe({
       entries.push({ feature, position });
       positions.push(position.x, position.y, position.z);
       colors.push(color.r, color.g, color.b);
-      sizes.push(isHit ? 9 : feature.source_type === "alert" ? 7 : 4.5);
+      // Sized down when the corpus went nationwide: at five cities a 7px alert
+      // dot read as one marker, but at ~500 features the dense clusters over the
+      // Gulf and the Southeast merged into a single blob and hid how many
+      // separate warnings were in them.
+      sizes.push(isHit ? 9 : feature.source_type === "alert" ? 5 : 3.4);
 
       // The published warning footprint, where there is one.
       if (feature.geometry) {
@@ -441,10 +445,13 @@ export default function Globe({
     }
     if (!hits.length) return;
 
-    // Most documents carry the coordinate of the city they were fetched for,
-    // so several hits routinely land on the exact same point. Fanning them
-    // around that point keeps every result visible as its own bar instead of
-    // stacking them into one.
+    // Hits still collide: two alerts sharing a zone footprint (a heat advisory
+    // and an extreme heat warning over the same counties) resolve to the same
+    // centroid, and several chunks of one long alert share its position
+    // exactly. Fanning them keeps every result visible as its own bar instead
+    // of stacking them into one. The offset is deliberately small - now that
+    // positions are the hazard's own geography rather than a stand-in, moving a
+    // marker far from its anchor would misreport where the weather is.
     const byAnchor = new Map<string, SearchHit[]>();
     for (const hit of hits) {
       const anchor = anchorOf(hit);
@@ -456,7 +463,7 @@ export default function Globe({
     for (const group_ of byAnchor.values()) {
       group_.forEach((hit, index) => {
         const anchor = anchorOf(hit)!;
-        const spread = group_.length > 1 ? 0.9 : 0;
+        const spread = group_.length > 1 ? 0.45 : 0;
         const angle = (index / Math.max(1, group_.length)) * Math.PI * 2;
         const lon = anchor.lon + Math.cos(angle) * spread;
         const lat = anchor.lat + Math.sin(angle) * spread * 0.72;

@@ -238,6 +238,33 @@ def main(base_url: str) -> int:
         check(all("narrative_text" not in f for f in features),
               "  map payload omits narrative bodies")
 
+        # The bug this guards: every zone-based alert used to inherit the
+        # coordinates of whichever city requested it, so a nationwide corpus
+        # collapsed onto a handful of dots. Distinct positions is the only
+        # symptom visible from outside, so assert on it directly.
+        alerts = [f for f in features if f["source_type"] == "alert"]
+        if alerts:
+            points = {(f["latitude"], f["longitude"]) for f in alerts}
+            check(len(points) > max(10, len(alerts) // 10),
+                  "  alerts are spread, not stacked on their requesting city",
+                  f"{len(points)} distinct point(s) for {len(alerts)} alert(s)")
+            check(all(f.get("geo_source") for f in alerts),
+                  "  every alert records how it was anchored")
+            sources = {f.get("geo_source") for f in alerts}
+            check(sources <= {"polygon", "zone", "state", "point"},
+                  "  anchor provenance uses known values", f"{sorted(sources)}")
+
+        # Coverage: the alert layer should not be confined to the states that
+        # happen to be in the forecast list.
+        states = {
+            (f.get("area_desc") or "").rsplit(",", 1)[-1].strip()[:2].upper()
+            for f in alerts
+        }
+        states = {s for s in states if len(s) == 2 and s.isalpha()}
+        check(len(states) >= 8,
+              "  alerts span many states, not just the synced cities",
+              f"{len(states)} state(s)")
+
         if features:
             doc_id = quote(features[0]["id"], safe="")
             r = session.get(f"{base_url}/weather/document/{doc_id}", timeout=30)
@@ -257,6 +284,8 @@ def main(base_url: str) -> int:
         geoms = [row["geometry"] for row in rows if row.get("geometry")]
         check(all("rings" in g for g in geoms),
               "search geometry matches the map's shape", f"{len(geoms)} polygon(s)")
+        check(all("geo_source" in row for row in rows),
+              "search results carry anchor provenance")
 
     # -- edge cases --------------------------------------------------------
     r = session.post(f"{base_url}/weather/search", json={}, timeout=60)

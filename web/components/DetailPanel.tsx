@@ -1,7 +1,7 @@
 "use client";
 
 import { colorOf } from "@/lib/severity";
-import { hasRealFootprint } from "@/lib/geo";
+import { anchorLabel } from "@/lib/geo";
 import type { Feature, SearchHit } from "@/lib/types";
 
 interface Props {
@@ -70,11 +70,7 @@ export default function DetailPanel({ feature, hit, loading, onClose }: Props) {
                 {when(feature.expires_at)}
               </dd>
               <dt>Footprint</dt>
-              <dd>
-                {hasRealFootprint(feature)
-                  ? `NWS polygon · ${feature.geometry!.rings.reduce((n, r) => n + r.length, 0)} points`
-                  : "Zone-based — plotted at the city point"}
-              </dd>
+              <dd>{anchorLabel(feature)}</dd>
               <dt>Coords</dt>
               <dd>
                 {feature.latitude?.toFixed(4)}, {feature.longitude?.toFixed(4)}

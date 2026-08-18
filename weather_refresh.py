@@ -22,9 +22,34 @@ import time
 from typing import Callable, Iterable
 
 import weather_pipeline
-from weather_client import VALID_SOURCES, WeatherClient
+import weather_zones
+from weather_client import (
+    DEFAULT_ALERT_SCOPE,
+    VALID_SOURCES,
+    WeatherClient,
+    all_cities,
+)
 
+# The forecast sweep for a routine refresh. Deliberately short: a forecast costs
+# two upstream calls per city and the text barely moves hour to hour, whereas
+# alerts - the part that actually changes - now arrive nationwide in one call
+# regardless of what is in this list. Pass locations="ALL" for the full sweep.
 DEFAULT_LOCATIONS = ["Chicago, IL", "Austin, TX", "Houston, TX", "Miami, FL", "Denver, CO"]
+
+# Accepted in place of a location list, by the notebook and the /weather/refresh
+# route, to mean "every built-in city".
+ALL_LOCATIONS_TOKEN = "ALL"
+
+
+def expand_locations(locations: Iterable[str] | None) -> list[str]:
+    """Resolve a location list, expanding the ALL token to every city."""
+    values = [str(v).strip() for v in locations] if locations else []
+    values = [v for v in values if v]
+    if not values:
+        return list(DEFAULT_LOCATIONS)
+    if any(v.upper() == ALL_LOCATIONS_TOKEN for v in values):
+        return all_cities()
+    return values
 
 
 def purge_expired(days: int) -> int:
@@ -57,6 +82,7 @@ def refresh_once(
     sources: Iterable[str] = VALID_SOURCES,
     purge_expired_days: int = 7,
     embed: bool = True,
+    alert_scope: str | None = None,
     log: Callable[[str], None] = print,
 ) -> dict:
     """Run one full cycle and return a summary dict.
@@ -66,12 +92,19 @@ def refresh_once(
     failures come back in the "errors" key so a caller can surface them.
     """
     started = time.time()
-    locations = list(locations) if locations else list(DEFAULT_LOCATIONS)
+    locations = expand_locations(locations)
     sources = list(sources)
+    alert_scope = alert_scope or DEFAULT_ALERT_SCOPE
 
     client = WeatherClient()
+    zone_resolver = weather_zones.ZoneCentroids(client, log=log)
     documents, errors = client.fetch_documents(
-        locations, limit=limit, sources=sources, log=log
+        locations,
+        limit=limit,
+        sources=sources,
+        alert_scope=alert_scope,
+        zone_resolver=zone_resolver,
+        log=log,
     )
 
     upserted = weather_pipeline.upsert_documents(documents)
@@ -94,9 +127,18 @@ def refresh_once(
             )
 
     stats = weather_pipeline.summarize()
+    by_geo: dict[str, int] = {}
+    for doc in documents:
+        key = doc.get("geo_source") or "none"
+        by_geo[key] = by_geo.get(key, 0) + 1
+
     return {
         "locations": locations,
+        "location_count": len(locations),
+        "alert_scope": alert_scope,
         "fetched": len(documents),
+        "by_geo_source": by_geo,
+        "zones": zone_resolver.stats(),
         "upserted": upserted["written"],
         "embeddings_invalidated": upserted["reembed"],
         "purged": purged,

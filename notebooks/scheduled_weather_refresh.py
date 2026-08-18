@@ -101,7 +101,7 @@ except ImportError:  # pragma: no cover - dotenv is absent on a job cluster
 # app mode. lakebase and weather_pipeline pull in psycopg2 and are imported
 # lazily inside the direct path, so a job container driving the app over HTTP
 # never needs a database driver at all.
-from weather_client import VALID_SOURCES, WeatherClient
+from weather_client import VALID_ALERT_SCOPES, VALID_SOURCES, WeatherClient
 
 DEFAULT_LOCATIONS = "Chicago, IL|Austin, TX|Houston, TX|Miami, FL|Denver, CO"
 
@@ -188,8 +188,14 @@ def main(argv: list[str] | None = None) -> int:
         "--locations",
         default=os.environ.get("WEATHER_LOCATIONS", DEFAULT_LOCATIONS),
         help='Pipe-separated, e.g. "Chicago, IL|Miami, FL". Pipe rather than '
-             'comma because each entry contains its own comma.',
+             'comma because each entry contains its own comma. Pass ALL for '
+             'every built-in city (all 50 states, DC and PR).',
     )
+    parser.add_argument(
+        "--alert-scope", default=None, choices=list(VALID_ALERT_SCOPES),
+        help="national (default) pulls every active US alert in one request, so "
+             "the alert layer covers states no location mentions. state/point "
+             "restrict alerts to the listed locations.")
     parser.add_argument("--limit", type=int, default=50,
                         help="Max documents per location per source (default: 50).")
     parser.add_argument("--sources", default=",".join(VALID_SOURCES),
@@ -201,10 +207,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--skip-embed", action="store_true",
         help="Harvest and upsert only, leaving the embedding to a separate run. "
-             "The Databricks Job uses this to keep the ONNX runtime and the "
-             "HTTP client in different processes - loading requests, psycopg2 "
-             "and fastembed into one serverless kernel crashes it, while either "
-             "pair on its own is fine.")
+             "Not needed on pg8000: the serverless crash was psycopg2's bundled "
+             "OpenSSL conflicting with the kernel's on connect, not fastembed.")
     parser.add_argument(
         "--db-driver", default=None, choices=["psycopg2", "pg8000"],
         help="Postgres driver. Use pg8000 in a Databricks serverless job; "
@@ -247,10 +251,14 @@ def main(argv: list[str] | None = None) -> int:
         sources=sources,
         purge_expired_days=args.purge_expired_days,
         embed=not args.skip_embed,
+        alert_scope=args.alert_scope,
         log=print,
     )
 
-    print(f"\nfetched:   {result['fetched']}")
+    print(f"\nfetched:   {result['fetched']}  "
+          f"(scope={result['alert_scope']}, {result['location_count']} forecast location(s))")
+    print(f"anchors:   {result['by_geo_source']}")
+    print(f"zones:     {result['zones']}")
     print(f"upserted:  {result['upserted']} row(s), "
           f"{result['embeddings_invalidated']} stale embedding row(s) invalidated")
     print(f"purged:    {result['purged']} expired alert(s)")

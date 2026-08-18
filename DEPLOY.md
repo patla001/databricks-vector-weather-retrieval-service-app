@@ -271,6 +271,13 @@ A scheduled Databricks Job **does** work, and one is running: `weather-daily-ing
 06:00 America/Los_Angeles daily. It is the same cycle the in-app timer runs, but
 it survives the app being stopped.
 
+It runs the **nationwide** sweep: `--alert-scope national` takes every active US
+alert in a single request, and `--locations ALL` expands to all 173 built-in
+cities so the forecast layer covers every state rather than the five that were
+hard-coded. A full run measured **231 seconds** end to end — 2624 documents
+harvested, 2639 chunks embedded, 0 errors — so the 90-minute task timeout is
+generous by design, not by necessity.
+
 ```bash
 databricks jobs create --json @resources/weather_daily_ingest_job.json
 databricks jobs run-now <job_id>          # verify before trusting the schedule

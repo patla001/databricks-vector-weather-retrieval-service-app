@@ -22,6 +22,13 @@ CREATE TABLE IF NOT EXISTS weather_documents (
     location       TEXT NOT NULL,
     latitude       DOUBLE PRECISION,
     longitude      DOUBLE PRECISION,
+    -- How latitude/longitude were decided: 'polygon' (the alert's own
+    -- footprint), 'zone' (centroid of the NWS zones it covers), 'state', or
+    -- 'point' (a forecast grid point, or an alert with nothing better). Four
+    -- alerts in five ship no polygon, so without this the map cannot tell an
+    -- exact footprint from an approximation - and earlier builds silently
+    -- plotted every zone-based alert on whichever city requested it.
+    geo_source     TEXT,
 
     source_type    TEXT NOT NULL CHECK (source_type IN ('alert', 'forecast')),
 
